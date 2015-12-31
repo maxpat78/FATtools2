@@ -1153,6 +1153,25 @@ class Dirtable(object):
 		self._update_dirtable(handle.Entry)
 		return self.opendir(name)
 
+	def rmtree(self, name=None):
+		"Remove a full directory tree"
+		if name:
+			target = self.opendir(name)
+		else:
+			target = self
+		if not target:
+			return 0
+		for it in target.iterator():
+			n = it.Name()
+			if it.IsDir():
+				if n in ('.', '..'): continue
+				target.opendir(n).rmtree()
+			target.erase(n)
+		del target
+		if name:
+			self.erase(name)
+		return 1
+
 	def close(self, handle):
 		"Update a modified entry in the table"
 		handle.close()
@@ -1244,8 +1263,11 @@ class Dirtable(object):
 			if not e:
 				return 0
 		if e.IsDir():
-			#~ logging.debug("Can't erase a directory slot @%d (pointing at #%d)", e._pos, e.Start())
-			return 0
+			it = self.opendir(e.Name()).iterator()
+			it.next(); it.next()
+			if next in it:
+				#~ logging.debug("Can't erase non empty directory slot @%d (pointing at #%d)", e._pos, e.Start())
+				return 0
 		self._update_dirtable(e, True)
 		for i in range(0, len(e._buf), 32):
 			e._buf[i] = 0xE5
@@ -1253,7 +1275,7 @@ class Dirtable(object):
 		self.stream.write(e._buf)
 		if e.Start():
 			self.fat.free(e.Start())
-		#~ logging.debug("Erased file slot @%d (pointing at #%d)", e._pos, e.Start())
+		#~ logging.debug("Erased slot @%d (pointing at #%d)", e._pos, e.Start())
 		return 1
 
 	def rename(self, name, newname):
