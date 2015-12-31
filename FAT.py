@@ -3,6 +3,7 @@
 #
 
 """ BUGS/TODO:
+- maxrun4len during writes, and avoid repeating computations when accessing the same run
 - pack & co.: update str += str with list join
 - 65,534 bytes limit for a folder?
 - parameters {} to tune cluster allocator?
@@ -885,7 +886,7 @@ class FATDirentry(Direntry):
 	@staticmethod
 	def MakeDosTime(t):
 		"Encode a tuple (hour, minute, second) into a DOS time WORD"
-		return (t[3] << 11) | (t[4] << 5) | (t[5]/2)
+		return (t[0] << 11) | (t[1] << 5) | (t[2]/2)
 
 	@staticmethod
 	def MakeDosDate(t):
@@ -1121,9 +1122,10 @@ class Dirtable(object):
 
 	def mkdir(self, name):
 		"Create a new directory slot, allocating the new directory table"
-		if self.opendir(name):
+		r = self.opendir(name)
+		if r:
 			#~ logging.debug("mkdir('%s') failed, entry already exists!", name)
-			return None
+			return r
 		if not FATDirentry.IsValidDosName(name, not FATDirentry.IsShortName(name)):
 			#~ logging.debug("mkdir('%s') failed, name contains invalid chars!", name)
 			return None
@@ -1149,7 +1151,7 @@ class Dirtable(object):
 		handle.File.write(dot.pack())
 		handle.File.write(bytearray(self.boot.cluster-64)) # blank table
 		self._update_dirtable(handle.Entry)
-		return handle.Dir
+		return self.opendir(name)
 
 	def close(self, handle):
 		"Update a modified entry in the table"
@@ -1388,12 +1390,18 @@ def opendisk(path, mode='rb'):
     return Dirtable(boot, fat, boot.dwRootCluster)
 
 
+
+		 #############################
+		# HIGH LEVEL HELPER ROUTINES #
+		############################
+
+
 def fat_copy_clusters(boot, fat, start):
 	"""Duplicate a cluster chain copying the cluster contents to another position.
 	Returns the first cluster of the new chain."""
 	count = fat.count(start)[0]
 	src = Chain(boot, fat, start, boot.cluster*count)
-	target = fat.alloc(count)
+	target = fat.alloc(count) # possibly defragmented
 	dst = Chain(boot, fat, target, boot.cluster*count)
 	logging.debug("Copying %s to %s", src, dst)
 	s = 1
@@ -1401,3 +1409,48 @@ def fat_copy_clusters(boot, fat, start):
 		s = src.read(boot.cluster)
 		dst.write(s)
 	return target
+
+
+
+def fat_copy_tree_inject(base, dest, callback=None, attributes=None):
+    """Copy recursively files and directories under real 'base' path into
+    virtual 'dest' directory table, calling callback function if provided."""
+
+    for root, folders, files in os.walk(base):
+        relative_dir = root[len(base)+1:]
+        # Split subdirs in target path
+        subdirs = []
+        while 1:
+            pro, epi = os.path.split(relative_dir)
+            if pro == relative_dir: break
+            relative_dir = pro
+            subdirs += [epi]
+        subdirs.reverse()
+
+        # Recursively open path to dest, creating directories if necessary
+        target_dir = dest
+        for subdir in subdirs:
+            target_dir = target_dir.mkdir(subdir)
+
+        # Finally, copy files
+        for file in files:
+            src = os.path.join(root, file)
+            fp = open(src, 'rb')
+            st = os.stat(src)
+            # Create target, preallocating all clusters
+            dst = target_dir.create(file, rdiv(st.st_size, dest.boot.cluster))
+            if callback: callback(src)
+            while 1:
+                s = fp.read(32768)
+                if not s: break
+                dst.write(s)
+
+            if attributes:
+                tm = time.localtime(st.st_mtime)
+                dst.Entry.wMDate = FATDirentry.MakeDosDate((tm.tm_year, tm.tm_mon, tm.tm_mday))
+                dst.Entry.wMTime = FATDirentry.MakeDosTime((tm.tm_hour, tm.tm_min, tm.tm_sec))
+
+                tm = time.localtime(st.st_atime)
+                dst.Entry.wADate = FATDirentry.MakeDosDate((tm.tm_year, tm.tm_mon, tm.tm_mday))
+                dst.Entry.wATime = FATDirentry.MakeDosTime((tm.tm_hour, tm.tm_min, tm.tm_sec))
+            dst.close()

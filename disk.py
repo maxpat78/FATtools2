@@ -45,10 +45,11 @@ class win32_disk(object):
 			sys.exit(1)
 
 	def tell(self):
-		windll.kernel32.SetFilePointer(self.handle, 0, 0, 1)
+		offset = windll.kernel32.SetFilePointer(self.handle, 0, 0, 1)
 		if windll.kernel32.GetLastError():
 			print "tell failed with error", windll.kernel32.GetLastError()
 			sys.exit(1)
+		return offset
 
 	def readinto(self, buf):
 		assert len(buf) > 0
