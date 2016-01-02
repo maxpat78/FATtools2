@@ -978,7 +978,6 @@ class FATDirentry(Direntry):
 				seqn += 1
 			self._buf[0] = self._buf[0] | 0x40 # mark the last slot (first to appear)
 
-
 	@staticmethod
 	def IsShortName(name):
 		"Check if name is an old-style 8+3 DOS short name"
@@ -989,6 +988,8 @@ class FATDirentry(Direntry):
 		# name.txt or NAME.TXT --> short
 		# Name.txt or name.Txt etc. --> long (preserve case)
 		# NT: NAME.txt or name.TXT or name.txt (short, bits 3-4 in 0x0C set accordingly)
+		# tix8.4.3 --> invalid short (name=tix8.4, ext=.3)
+		# dde1.3 --> valid short, (name=dde1, ext=.3)
 		elif 1 <= len(name) <= 8 and len(ext) <= 4 and (name==name.upper() or name==name.lower()):
 			if FATDirentry.IsValidDosName(name):
 				is_8dot3 = True
@@ -999,9 +1000,7 @@ class FATDirentry(Direntry):
 		if lfn:
 			special = ''':?/|\<>'''
 		else:
-		# CAVE! DDE1.3 --> valid short name
-		# DDE1..3 --> invalid short
-			special = ''' :?+,;=[]/|\<>'''
+			special = ''' .:?+,;=[]/|\<>'''
 		for c in special:
 			if c in name:
 				return False
@@ -1126,7 +1125,7 @@ class Dirtable(object):
 		if r:
 			#~ logging.debug("mkdir('%s') failed, entry already exists!", name)
 			return r
-		if not FATDirentry.IsValidDosName(name, not FATDirentry.IsShortName(name)):
+		if not FATDirentry.IsValidDosName(name, True):
 			#~ logging.debug("mkdir('%s') failed, name contains invalid chars!", name)
 			return None
 		handle = self._alloc(name)
