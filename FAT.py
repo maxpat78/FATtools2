@@ -1,21 +1,20 @@
 # -*- coding: mbcs -*-
-# Utilities to manage a FAT12/16/32 or exFAT file system
+# Utilities to manage a FAT12/16/32 file system
 #
 
 """ BUGS/TODO:
-- maxrun4len during writes, and avoid repeating computations when accessing the same run
+- must invalidate handle to erased/replaced objects not explicitly closed!
+- limit calls to maxrun4len while in the same run
 - pack & co.: update str += str with list join
 - 65,534 bytes limit for a folder?
+- use FAT32 FSInfo
 - parameters {} to tune cluster allocator?
 - avoid multiple disk objects?
 - probe Chain multiple read/write/seek ops consistency
 - update boot_xxx object with mkfs
 - reorganize seeking? calls should be reduced?
 - guard against seek beyond last valid offset (specially in FixedRoot)
-- try to allocate-on-write-only clusters in Chain
-- rmtree function?
 - generalize pack() in utils.py
-- create with full pathnames, like open & opendir?
 - implement exFAT mkfs & write support
 
 Advantages of common_getattr & pack technique in respect of property():
@@ -464,7 +463,6 @@ class FAT(object):
 		#~ logging.debug("freed last cluster %Xh", start)
 
 
-# Re-implement Chain in a more simple way?
 class Chain(object):
 	"Open a cluster chain like a plain file"
 	def __init__ (self, boot, fat, cluster, size=0, nofat=0):
@@ -472,16 +470,18 @@ class Chain(object):
 		self.stream = boot.stream
 		self.boot = boot
 		self.fat = fat
-		self.start = cluster # cluster iniziale
-		self.filesize = size # dimensione del file, se disponibile
-		self.size = rdiv(size,boot.cluster)*boot.cluster # dimensione in byte della catena di cluster
-		self.nofat = nofat # privo di catena FAT (=contiguo)
+		self.start = cluster # start cluster or zero if empty
+		self.filesize = size # file size, if available
+		self.size = 0
+		if self.start:
+			self.size = fat.count(cluster)[0]*boot.cluster
+		self.nofat = nofat # does not use FAT (=contig)
 		self.pos = 0 # virtual stream linear pos
-		# Virtual Cluster Number (indice del cluster nella catena)
+		# Virtual Cluster Number (cluster index in this chain)
 		self.vcn = -1
-		# Virtual Cluster Offset (posizione nel VCN)
+		# Virtual Cluster Offset (current offset in VCN)
 		self.vco = -1
-		self.lastvlcn = (0, cluster) # VCN e LCN dell'ultimo cluster esaminato
+		self.lastvlcn = (0, cluster) # last cluster VCN & LCN
 		#~ logging.debug("Cluster chain of %d%sbytes (%d bytes) @%Xh", self.filesize, (' ', ' contiguous ')[nofat], self.size, cluster)
 
 	def __str__ (self):
@@ -491,7 +491,7 @@ class Chain(object):
 		n = rdiv(length, self.boot.cluster)
 		count, next = self.fat.count_run(self.lastvlcn[1], n)
 		maxchunk = count * self.boot.cluster
-		#~ logging.debug("%d bytes (%d clusters) fragment from VCN #%d (next LCN=%Xh)", maxchunk, n, self.lastvlcn[0], next)
+		#~ logging.debug("maxrun4len: %d bytes (%d clusters) fragment from VCN #%d (next LCN=%Xh)", maxchunk, n, self.lastvlcn[0], next)
 		# Update (Last VCN, Next LCN) for fragment
 		self.lastvlcn = (self.lastvlcn[0]+n, next)
 		return maxchunk
@@ -509,6 +509,12 @@ class Chain(object):
 				self.pos = self.size - offset
 		else:
 			self.pos = offset
+		# if emtpy chain, allocate some clusters
+		if self.pos and not self.size:
+			clusters = rdiv(self.pos, self.boot.cluster)
+			self.start = self.fat.alloc(clusters)
+			self.size = clusters * self.boot.cluster
+			#~ logging.debug("Chain.seek:allocated %d clusters from #%Xh seeking %X", clusters, self.start, self.pos)
 		self.vcn = self.pos / self.boot.cluster # n-th cluster chain
 		self.vco = self.pos % self.boot.cluster # offset in it
 		self.realseek()
@@ -548,13 +554,13 @@ class Chain(object):
 	def read(self, size=-1):
 		#~ logging.debug("read(%d) called from offset %Xh", size, self.pos)
 		self.seek(self.pos)
-		# If negative size, adjust
+		# If negative size, set it to file size
 		if size < 0:
-			size = 0
-			if self.filesize: size = self.filesize
+			size = self.filesize
 		# If requested size is greater than file size, limit to the latter
-		if self.size and self.pos + size > self.size:
-			size = self.size - self.pos
+		if self.pos + size > self.filesize:
+			size = self.filesize - self.pos
+			if size < 0: size = 0
 		buf = bytearray()
 		if self.nofat: # contiguous clusters
 			if not size or self.vcn == -1:
@@ -579,34 +585,44 @@ class Chain(object):
 		#~ logging.debug("Chain.write(buf[:%d]) called from offset %Xh, VCN=%Xh[%Xh:]", len(s), self.pos, self.vcn, self.vco)
 		new_allocated = 0
 		if self.pos + len(s) > self.size:
+			# Alloc more clusters from actual last one
 			reqb = self.pos + len(s) - self.size
 			reqc = rdiv(reqb, self.boot.cluster)
 			#~ logging.debug("pos=%X(%d), len=%d, size=%d(%Xh)", self.pos, self.pos, len(s), self.size, self.size)
 			#~ logging.debug("needed %d bytes (%d clusters) more to continue writing", reqb, reqc)
-			# Alloc more clusters from actual last one
-			lastc = self.fat.count(self.start)[1]
-			self.fat.alloc(reqc, lastc, lastc) # first=lastc since we continue the chain
+			if self.start:
+				lastc = self.fat.count(self.start)[1]
+				self.fat.alloc(reqc, lastc, lastc) # first=lastc since we continue the chain
+				self.size += reqc*self.boot.cluster
+			else:
+				# if chain is empty, again, simply allocate the clusters...
+				self.start = self.fat.alloc(reqc)
+				# ...and force a seek on the real medium
+				self.size = reqc*self.boot.cluster
+				self.seek(self.pos)
 			new_allocated = 1
-			self.size += reqc*self.boot.cluster
+		i = 0
 		btoe = self.boot.cluster - self.vco # bytes to cluster's end
-		while len(s) > btoe:
+		if len(s) > btoe:
 			#~ logging.debug("writing %d bytes to end of cluster", btoe)
 			self.seek(self.pos)
 			self.stream.write(s[:btoe])
 			self.pos += btoe
+			i += btoe
+		while i < len(s):
 			self.seek(self.pos)
-			s = s[btoe:]
-			btoe = self.boot.cluster - self.vco
-			#~ logging.debug("btoe=%d, len(s)=%d", btoe, len(s))
-		self.seek(self.pos)
-		self.stream.write(s)
-		self.pos += len(s)
-		self.seek(self.pos)
-		# experimental tracking of increasing size
+			# write minimum between s rest and maximum contig run
+			n = min(len(s)-i, self.maxrun4len(len(s)-i))
+			self.stream.write(s[i:i+n])
+			self.pos += n
+			i += n
+			#~ logging.debug("written s[%d:%d] for %d contiguous bytes (todo=%d)", i-n, i, n, len(s)-i)
+		# file size is the top pos reached during write
 		self.filesize = max(self.filesize, self.pos)
+		self.seek(self.pos)
 		if new_allocated:
 			if self.pos < self.size:
-				#~ logging.debug("Blanking newly allocated cluster tip, %d bytes @%Xh", self.size-self.pos, self.pos)
+				#~ logging.debug("blanking newly allocated cluster tip, %d bytes @%Xh", self.size-self.pos, self.pos)
 				self.stream.write(bytearray(self.size - self.pos))
 
 	def trunc(self):
@@ -744,9 +760,17 @@ class Handle(object):
 		if not self.IsValid:
 			return
 
+		# Force setting the start cluster if allocated on write
+		self.Entry.Start(self.File.start)
+		
 		if not self.Entry.IsDir():
-			self.Entry.dwFileSize = self.File.pos
-			# Free cluster allocated on creation
+			if self.Entry._buf[-32] == 0xE5 and self.Entry.Start():
+				#~ logging.debug("Deleted file: deallocating cluster(s)")
+				self.File.fat.free(self.Entry.Start())
+				return
+
+			self.Entry.dwFileSize = self.File.filesize
+			# Free cluster allocated if empty at last
 			if not self.Entry.dwFileSize and self.Entry.Start():
 				#~ logging.debug("Empty file: deallocating cluster(s)")
 				self.File.fat.free(self.Entry.Start())
@@ -754,10 +778,9 @@ class Handle(object):
 				self.Entry.wClusterLo = 0
 
 		self.Dir.stream.seek(self.Entry._pos)
-		#~ logging.debug("Closing Handle @%Xh (abs:%Xh) to '%s.%s', pos=%d size=%d filesize=%d", \
-		#~ self.Entry._pos, self.Dir.realtell(), self.Entry.sName, self.Entry.sExt, self.File.pos, self.File.size, self.File.filesize)
+		#~ logging.debug('Closing Handle @%Xh(%Xh) to "%s", cluster=%Xh tell=%d chain=%d size=%d', \
+		#~ self.Entry._pos, self.Dir.stream.realtell(), os.path.join(self.Dir.path,self.Entry.Name()), self.Entry.Start(), self.File.pos, self.File.size, self.File.filesize)
 		self.Dir.stream.write(self.Entry.pack())
-		#~ logging.debug("Updated Direntry @%X", self.Entry._pos)
 		self.IsValid = False
 
 
@@ -978,6 +1001,7 @@ class FATDirentry(Direntry):
 				seqn += 1
 			self._buf[0] = self._buf[0] | 0x40 # mark the last slot (first to appear)
 
+
 	@staticmethod
 	def IsShortName(name):
 		"Check if name is an old-style 8+3 DOS short name"
@@ -1033,7 +1057,7 @@ class Dirtable(object):
 		self.boot = boot
 		self.fat = fat
 		self.start = startcluster
-		self.path = '.'
+		self.path = path
 		self.lastfreeslot = 0 # last free slot found (to reduce search time)
 		if startcluster == size == 0:
 			self.stream = FixedRoot(boot, fat)
@@ -1077,19 +1101,23 @@ class Dirtable(object):
 		for com in path:
 			e = found.find(com)
 			if e and e.IsDir():
-				found = Dirtable(self.boot, self.fat, e.Start(), e.dwFileSize)
+				found = Dirtable(self.boot, self.fat, e.Start(), path=os.path.join(found.path, com))
 				continue
 			found = None
 			break
 		if found:
-			found.path = name
+			#~ logging.debug("opened directory table '%s' @%Xh (cluster %Xh)", found.path, self.boot.cl2offset(found.start), found.start)
 		return found
 
-	def _alloc(self, name, clusters=1):
+	def _alloc(self, name, clusters=0):
 		"Alloc a new Direntry slot (both file/directory)"
 		res = Handle()
 		res.IsValid = True
-		res.File = Chain(self.boot, self.fat, self.fat.alloc(clusters), clusters*self.boot.cluster)
+		if clusters:
+			start = self.fat.alloc(clusters)
+		else:
+			start = 0
+		res.File = Chain(self.boot, self.fat, start)
 		pos = self.findfree()
 		dentry = FATDirentry(bytearray(32), pos)
 		# If name is a LFN, generate a short one valid in this table
@@ -1106,7 +1134,7 @@ class Dirtable(object):
 		res.Entry = dentry
 		return res
 
-	def create(self, name, prealloc=1):
+	def create(self, name, prealloc=0):
 		"Create a new file chain and the associated slot. Erase pre-existing filename."
 		e = self.open(name)
 		if e.IsValid:
@@ -1117,6 +1145,7 @@ class Dirtable(object):
 		self.stream.write(handle.Entry.pack())
 		handle.Dir = self
 		self._update_dirtable(handle.Entry)
+		#~ logging.debug("Created new file '%s' @%Xh", name, handle.File.start)
 		return handle
 
 	def mkdir(self, name):
@@ -1125,15 +1154,18 @@ class Dirtable(object):
 		if r:
 			#~ logging.debug("mkdir('%s') failed, entry already exists!", name)
 			return r
+		# Check if it is a supported name (=at most LFN)
 		if not FATDirentry.IsValidDosName(name, True):
 			#~ logging.debug("mkdir('%s') failed, name contains invalid chars!", name)
 			return None
-		handle = self._alloc(name)
+		handle = self._alloc(name, 1)
 		self.stream.seek(handle.Entry._pos)
-		#~ logging.debug("Making new directory '%s'", name)
+		#~ logging.debug("Making new directory '%s' @%Xh", name, handle.File.start)
 		handle.Entry.chDOSPerms = 0x10
 		self.stream.write(handle.Entry.pack())
 		handle.Dir = self
+		# PLEASE NOTE: Windows 10 opens a slot as directory and works regularly
+		# even if table does not start with dot entries: but CHKDSK corrects it!
 		# . in new table
 		dot = FATDirentry(bytearray(32), 0)
 		dot.GenRawSlotFromName('.')
@@ -1150,24 +1182,29 @@ class Dirtable(object):
 		handle.File.write(dot.pack())
 		handle.File.write(bytearray(self.boot.cluster-64)) # blank table
 		self._update_dirtable(handle.Entry)
+		handle.close()
 		return self.opendir(name)
 
 	def rmtree(self, name=None):
 		"Remove a full directory tree"
 		if name:
+			#~ logging.debug("rmtree:opening %s", name)
 			target = self.opendir(name)
 		else:
 			target = self
 		if not target:
+			#~ logging.debug("rmtree:target '%s' not found!", name)
 			return 0
 		for it in target.iterator():
 			n = it.Name()
 			if it.IsDir():
 				if n in ('.', '..'): continue
 				target.opendir(n).rmtree()
+			#~ logging.debug("rmtree:erasing '%s'", n)
 			target.erase(n)
 		del target
 		if name:
+			#~ logging.debug("rmtree:erasing '%s'", name)
 			self.erase(name)
 		return 1
 
@@ -1211,25 +1248,6 @@ class Dirtable(object):
 			buf = bytearray()
 		self.stream.seek(told)
 
-	#~ def iterator(self):
-		#~ told = self.stream.tell()
-		#~ buf = []
-		#~ s = 1
-		#~ pos = 0
-		#~ while s:
-			#~ self.stream.seek(pos)
-			#~ s = self.stream.read(32)
-			#~ pos += 32
-			#~ if not s or s[0] == 0: break
-			#~ if s[0] == 0xE5: continue
-			#~ if s[0x0B] == 0x0F and s[0x0C] == s[0x1A] == s[0x1B] == 0: # LFN
-				#~ buf += [s]
-				#~ continue
-			#~ buf += [s]
-			#~ yield FATDirentry(bytearray().join(buf), self.stream.tell()-len(buf))
-			#~ buf = []
-		#~ self.stream.seek(told)
-
 	def _update_dirtable(self, it, erase=False):
 		if erase:
 			del Dirtable.dirtable[self.start]['Names'][it.ShortName().lower()]
@@ -1241,7 +1259,6 @@ class Dirtable(object):
 		ln = it.LongName()
 		if ln:
 			Dirtable.dirtable[self.start]['LFNs'][ln.lower()] = it
-
 
 	def find(self, name):
 		"Find an entry by name. Returns it or None if not found"
@@ -1265,16 +1282,19 @@ class Dirtable(object):
 			it = self.opendir(e.Name()).iterator()
 			it.next(); it.next()
 			if next in it:
-				#~ logging.debug("Can't erase non empty directory slot @%d (pointing at #%d)", e._pos, e.Start())
+				logging.debug("Can't erase non empty directory slot @%d (pointing at #%d)", e._pos, e.Start())
 				return 0
+		start = e.Start()
+		e.Start(0)
+		e.dwFileSize = 0
 		self._update_dirtable(e, True)
 		for i in range(0, len(e._buf), 32):
 			e._buf[i] = 0xE5
 		self.stream.seek(e._pos)
 		self.stream.write(e._buf)
-		if e.Start():
-			self.fat.free(e.Start())
-		#~ logging.debug("Erased slot @%d (pointing at #%d)", e._pos, e.Start())
+		if start:
+			self.fat.free(start)
+		#~ logging.debug("Erased slot '%s' @%Xh (pointing at #%d)", name, e._pos, start)
 		return 1
 
 	def rename(self, name, newname):
