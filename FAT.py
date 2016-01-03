@@ -4,7 +4,6 @@
 
 """ BUGS/TODO:
 - must invalidate handle to erased/replaced objects not explicitly closed!
-- limit calls to maxrun4len while in the same run
 - pack & co.: update str += str with list join
 - 65,534 bytes limit for a folder?
 - use FAT32 FSInfo
@@ -466,7 +465,6 @@ class FAT(object):
 class Chain(object):
 	"Open a cluster chain like a plain file"
 	def __init__ (self, boot, fat, cluster, size=0, nofat=0):
-		# Crea uno stream autonomo, con propria cache
 		self.stream = boot.stream
 		self.boot = boot
 		self.fat = fat
@@ -491,7 +489,7 @@ class Chain(object):
 		n = rdiv(length, self.boot.cluster)
 		count, next = self.fat.count_run(self.lastvlcn[1], n)
 		maxchunk = count * self.boot.cluster
-		#~ logging.debug("maxrun4len: %d bytes (%d clusters) fragment from VCN #%d (next LCN=%Xh)", maxchunk, n, self.lastvlcn[0], next)
+		#~ logging.debug("maxrun4len: run of %d bytes (%d clusters) from VCN #%d (first,next LCN=%Xh,%Xh)", maxchunk, n, self.lastvlcn[0], self.lastvlcn[1], next)
 		# Update (Last VCN, Next LCN) for fragment
 		self.lastvlcn = (self.lastvlcn[0]+n, next)
 		return maxchunk
@@ -520,7 +518,7 @@ class Chain(object):
 		self.realseek()
 		
 	def realseek(self):
-		#~ logging.debug("realseek() with VCN=%d VCO=%d", self.vcn,self.vco)
+		#~ logging.debug("realseek with VCN=%d VCO=%d", self.vcn,self.vco)
 		if self.size and self.pos >= self.size:
 			#~ logging.debug("%s: detected chain end at VCN #%d while seeking", self, self.vcn)
 			self.vcn = -1
@@ -548,7 +546,7 @@ class Chain(object):
 			#~ if self.fat.islast(cluster):
 			if (self.fat.last <= cluster <= self.fat.last+7):
 				self.vcn = -1
-		#~ logging.debug("next cluster after realseek(): VCN=%d, LCN=%Xh [%Xh:] @%Xh", self.vcn, cluster, self.vco, self.boot.cl2offset(cluster))
+		#~ logging.debug("realseek seeking VCN=%d LCN=%Xh [%Xh:] @%Xh", self.vcn, cluster, self.vco, self.boot.cl2offset(cluster))
 		self.stream.seek(self.boot.cl2offset(cluster)+self.vco)
 
 	def read(self, size=-1):
@@ -1105,8 +1103,7 @@ class Dirtable(object):
 				continue
 			found = None
 			break
-		if found:
-			#~ logging.debug("opened directory table '%s' @%Xh (cluster %Xh)", found.path, self.boot.cl2offset(found.start), found.start)
+		#~ if found: logging.debug("opened directory table '%s' @%Xh (cluster %Xh)", found.path, self.boot.cl2offset(found.start), found.start)
 		return found
 
 	def _alloc(self, name, clusters=0):
@@ -1188,23 +1185,23 @@ class Dirtable(object):
 	def rmtree(self, name=None):
 		"Remove a full directory tree"
 		if name:
-			#~ logging.debug("rmtree:opening %s", name)
+			logging.debug("rmtree:opening %s", name)
 			target = self.opendir(name)
 		else:
 			target = self
 		if not target:
-			#~ logging.debug("rmtree:target '%s' not found!", name)
+			logging.debug("rmtree:target '%s' not found!", name)
 			return 0
 		for it in target.iterator():
 			n = it.Name()
 			if it.IsDir():
 				if n in ('.', '..'): continue
 				target.opendir(n).rmtree()
-			#~ logging.debug("rmtree:erasing '%s'", n)
+			logging.debug("rmtree:erasing '%s'", n)
 			target.erase(n)
 		del target
 		if name:
-			#~ logging.debug("rmtree:erasing '%s'", name)
+			logging.debug("rmtree:erasing '%s'", name)
 			self.erase(name)
 		return 1
 
@@ -1282,7 +1279,7 @@ class Dirtable(object):
 			it = self.opendir(e.Name()).iterator()
 			it.next(); it.next()
 			if next in it:
-				logging.debug("Can't erase non empty directory slot @%d (pointing at #%d)", e._pos, e.Start())
+				#~ logging.debug("Can't erase non empty directory slot @%d (pointing at #%d)", e._pos, e.Start())
 				return 0
 		start = e.Start()
 		e.Start(0)
@@ -1396,14 +1393,23 @@ class Dirtable(object):
 
 	def list(self, bare=False):
 		"Simple directory listing, with size and last modification time"
+		print "   Directory of", self.path, "\n"
+		tot_files = 0
+		tot_bytes = 0
+		tot_dirs = 0
 		for it in self.iterator():
 			if it.IsLabel(): continue
 			if bare:
 				print it.Name()
 			else:
+				tot_bytes += it.dwFileSize
+				if it.IsDir(): tot_dirs += 1
+				else: tot_files += 1
 				mtime = datetime(*(it.ParseDosDate(it.wMDate) + it.ParseDosTime(it.wMTime))).isoformat()[:-3].replace('T',' ')
 				print "%8s  %s  %s" % ((str(it.dwFileSize),'<DIR>')[it.IsDir()], mtime, it.Name())
-
+		if not bare:
+			print "%18s Files    %s bytes" % (tot_files, tot_bytes)
+			print "%18s Directories" % tot_dirs
 
 
 def opendisk(path, mode='rb'):

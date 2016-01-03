@@ -106,7 +106,7 @@ class disk(object):
 		self.buf = None # read buffer
 		self.blocksize = 512 # fixed sector size
 		# Cache only small 512 sectors
-		self.rawcache = bytearray(1<<20) # 1 MB cache buffer
+		self.rawcache = bytearray(512<<10) # 512K cache buffer
 		self.cache = memoryview(self.rawcache)
 		self.cache_index = 0 # offset of next cache slot
 		self.cache_hits = 0 # sectors retrieved from cache
@@ -133,10 +133,13 @@ class disk(object):
 			self.pos = offset
 		self.si = self.pos / self.blocksize
 		self.so = self.pos % self.blocksize
-		if self.si == self.lastsi:
-			return # does not seek if sector is the same
+		#~ logging.debug("disk pointer to set @%Xh", self.si*self.blocksize)
+		# 3.1.16: there are corner cases when test is true, but fp is not
+		# correctly set (i.e. remains at previous sector)
+		#~ if self.si == self.lastsi:
+			#~ logging.debug("seek returning: self.si == self.lastsi == %d", self.si)
+			#~ return # does not seek if sector is the same
 		self._file.seek(self.si*self.blocksize)
-		#~ logging.debug("disk seek @%Xh", self.si*self.blocksize)
 		#~ logging.debug("si=%Xh lastsi=%Xh so=%Xh", self.si,self.lastsi,self.so)
 		
 	def tell(self):
@@ -152,11 +155,7 @@ class disk(object):
 			self._file.seek(sector*self.blocksize)
 			i = self.cache_table[sector]
 			self._file.write(self.cache[i:i+self.blocksize])
-			#~ if sector == 1:
-				#~ logging.debug("Flushed sector #1:\n%s", hexdump.hexdump(self.cache[i:i+self.blocksize],'return'))
 			del self.cache_dirties[sector]
-			#~ 26.12.15: TRYING W/O THIS!
-			#~ del self.cache_table[sector]
 			#~ logging.debug("%s: flushed sector #%d from cache[%d]", self, sector,i/512)
 			return
 		#~ logging.debug("%s: flushing %d dirty sectors from cache", self, len(self.cache_dirties))
@@ -165,7 +164,7 @@ class disk(object):
 			self._file.seek(sec*self.blocksize)
 			i = self.cache_table[sec]
 			self._file.write(self.cache[i:i+self.blocksize])
-		logging.debug("Cache items/hits/misses: %d/%d/%d", len(self.cache_table), self.cache_hits, self.cache_misses)
+		#~ logging.debug("Cache items/hits/misses: %d/%d/%d", len(self.cache_table), self.cache_hits, self.cache_misses)
 		self.cache_dirties = {}
 		self.cache_table = {}
 		self.cache_tableR = {}
@@ -210,10 +209,11 @@ class disk(object):
 			self.seek(self.pos)
 		pos = self.cache_index
 		#~ logging.debug("loading disk sector #%d into cache[%d] from offset %Xh", self.si, pos/512, self._file.tell())
+		#~ logging.debug("loading disk sector #%d into cache[%d]", self.si, pos/512)
 		self._file.readinto(self.cache[pos:pos+self.asize])
-		# bytearray didn't work on 2nd call: why???
-		#~ self.buf = bytearray(self.cache[pos:pos+self.asize])
 		self.buf = self.cache[pos:pos+self.asize]
+		#~ if self.si == 50900:
+			#~ logging.debug("Loaded sector #50900:\n%s", hexdump.hexdump(self.cache[pos:pos+self.asize],'return'))
 		self.cache_index += self.asize
 		# Update dictionary of cached sectors and their position
 		# Invalidate accordingly if we are recycling pool from zero?
@@ -391,6 +391,10 @@ if __name__ == '__main__':
 		d.write(orig)
 		d.seek(-2, 1)
 		assert orig == bytearray(d.read(2))
+
+#~ NOTA: self.pos in (direct) read deve essere aggiornato o no? A logica sì, ma fare
+#~ attenzione che le successive letture in cache avvengano dall'offset giusto del disco!
+#~ Caso tipico: la FAT12 del floppy corrotta, poiché rileggeva il settore 1 da un offset più avanzato!
 
 	print "Testing sequential writing & reading 2byte-for-2byte of 2 sectors..."
 	d.seek(3)
