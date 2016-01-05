@@ -1,5 +1,6 @@
 # -*- coding: mbcs -*-
-import utils, struct, disk, os, sys, pprint, FAT
+import utils, struct, disk, os, sys, pprint
+from FAT import *
 
 """ FROM https://support.microsoft.com/en-us/kb/140365
 
@@ -35,220 +36,6 @@ Volume size 	Windows NT 3.51	    Windows NT 4.0	    Windows 2000+
 > 16 GB	        Not supported 	    Not supported	    Not supported """
 
 nodos_asm_5Ah = '\xB8\xC0\x07\x8E\xD8\xBE\x73\x00\xAC\x08\xC0\x74\x09\xB4\x0E\xBB\x07\x00\xCD\x10\xEB\xF2\xF4\xEB\xFD\x4E\x4F\x20\x44\x4F\x53\x00'
-
-class boot_fat32(object):
-    "FAT32 Boot Sector"
-    layout = { # { offset: (name, unpack string) }
-    0x00: ('chJumpInstruction', '3s'),
-    0x03: ('chOemID', '8s'),
-    0x0B: ('wBytesPerSector', '<H'),
-    0x0D: ('uchSectorsPerCluster', 'B'),
-    0x0E: ('wSectorsCount', '<H'), # reserved sectors (min 32?)
-    0x10: ('uchFATCopies', 'B'),
-    0x11: ('wMaxRootEntries', '<H'),
-    0x13: ('wTotalSectors', '<H'),
-    0x15: ('uchMediaDescriptor', 'B'),
-    0x16: ('wSectorsPerFAT', '<H'), # not used, see 24h instead
-    0x18: ('wSectorsPerTrack', '<H'),
-    0x1A: ('wHeads', '<H'),
-    0x1C: ('wHiddenSectors', '<H'),
-    0x1E: ('wTotalHiddenSectors', '<H'),
-    0x20: ('dwTotalLogicalSectors', '<I'),
-    0x24: ('dwSectorsPerFAT', '<I'),
-    0x28: ('wMirroringFlags', '<H'), # bits 0-3: active FAT, it bit 7 set; else: mirroring as usual
-    0x2A: ('wVersion', '<H'),
-    0x2C: ('dwRootCluster', '<I'), # usually 2
-    0x30: ('wFSISector', '<H'), # usually 1
-    0x32: ('wBootCopySector', '<H'), # 0x0000 or 0xFFFF if unused, usually 6
-    0x34: ('chReserved', '12s'),
-    0x40: ('chPhysDriveNumber', 'B'),
-    0x41: ('chFlags', 'B'),
-    0x42: ('chExtBootSignature', 'B'),
-    0x43: ('dwVolumeID', '<I'),
-    0x47: ('sVolumeLabel', '11s'),
-    0x52: ('sFSType', '8s'),
-    #~ 0x72: ('chBootstrapCode', '390s'),
-    0x1FE: ('wBootSignature', '<H') # 55 AA
-    } # Size = 0x200 (512 byte)
-
-    def __init__ (self, s=None, offset=0):
-        self._i = 0
-        self._pos = offset # base offset
-        self._buf = s or bytearray(512) # normal boot sector size
-        self.stream = None
-        self._kv = self.layout.copy()
-        self._vk = {} # { name: offset}
-        for k, v in self._kv.items():
-            self._vk[v[0]] = k
-        self.__init2__()
-
-    def __init2__(self):
-        if not self.wBytesPerSector: return
-        # Cluster size (bytes)
-        self.cluster = self.wBytesPerSector * self.uchSectorsPerCluster
-        # Offset of the 1st FAT copy
-        self.fatoffs = self.wSectorsCount * self.wBytesPerSector + self._pos
-        # Data area offset (=cluster #2)
-        self.dataoffs = self.fatoffs + self.uchFATCopies * self.dwSectorsPerFAT * self.wBytesPerSector + self._pos
-        # Number of clusters represented in this FAT (if valid buffer)
-        self.fatsize = self.dwTotalLogicalSectors/self.uchSectorsPerCluster
-
-    __getattr__ = utils.common_getattr
-
-    def __str__ (self):
-        return utils.class2str(self, "FAT32 Boot Sector @%x\n" % self._pos)
-
-    def pack(self):
-        "Update internal buffer"
-        for k, v in self._kv.items():
-            self._buf[k:k+struct.calcsize(v[1])] = struct.pack(v[1], getattr(self, v[0]))
-        self.__init2__()
-        return self._buf
-
-    def clusters(self):
-        "Return the number of clusters in the data area"
-        # Total sectors minus sectors preceding the data area
-        return (self.dwTotalLogicalSectors - (self.dataoffs/self.wBytesPerSector)) / self.uchSectorsPerCluster
-
-    def cl2offset(self, cluster):
-        "Return the real offset of a cluster"
-        return self.dataoffs + (cluster-2)*self.cluster
-        
-    def root(self):
-        "Return the offset of the root directory"
-        return self.cl2offset(self.dwRootCluster)
-
-    def fat(self, fatcopy=0):
-        "Return the offset of a FAT table (the first by default)"
-        return self.fatoffs + fatcopy * self.dwSectorsPerFAT * self.wBytesPerSector
-
-
-
-class fat32_fsinfo(object):
-    "FAT32 FSInfo Sector (usually sector 1)"
-    layout = { # { offset: (name, unpack string) }
-    0x00: ('sSignature1', '4s'), # RRaA
-    0x1E4: ('sSignature2', '4s'), # rrAa
-    0x1E8: ('dwFreeClusters', '<I'), # 0xFFFFFFFF if unused (may be incorrect)
-    0x1EC: ('dwNextFreeCluster', '<I'), # hint only (0xFFFFFFFF if unused)
-    0x1FE: ('wBootSignature', '<H') # 55 AA
-    } # Size = 0x200 (512 byte)
-
-    def __init__ (self, s=None, offset=0):
-        self._i = 0
-        self._pos = offset # base offset
-        self._buf = s or bytearray(512) # normal FSInfo sector size
-        self.stream = None
-        self._kv = self.layout.copy()
-        self._vk = {} # { name: offset}
-        for k, v in self._kv.items():
-            self._vk[v[0]] = k
-
-    __getattr__ = utils.common_getattr
-
-    def pack(self):
-        "Update internal buffer"
-        for k, v in self._kv.items():
-            self._buf[k:k+struct.calcsize(v[1])] = struct.pack(v[1], getattr(self, v[0]))
-        return self._buf
-
-    def __str__ (self):
-        return utils.class2str(self, "FAT32 FSInfo Sector @%x\n" % self._pos)
-
-
-
-class boot_fat16(object):
-    "FAT12/16 Boot Sector"
-    layout = { # { offset: (name, unpack string) }
-    0x00: ('chJumpInstruction', '3s'),
-    0x03: ('chOemID', '8s'),
-    0x0B: ('wBytesPerSector', '<H'),
-    0x0D: ('uchSectorsPerCluster', 'B'),
-    0x0E: ('wSectorsCount', '<H'),
-    0x10: ('uchFATCopies', 'B'),
-    0x11: ('wMaxRootEntries', '<H'),
-    0x13: ('wTotalSectors', '<H'),
-    0x15: ('uchMediaDescriptor', 'B'),
-    0x16: ('wSectorsPerFAT', '<H'), #DWORD in FAT32
-    0x18: ('wSectorsPerTrack', '<H'),
-    0x1A: ('wHeads', '<H'),
-    0x1C: ('dwHiddenSectors', '<I'), # Here differs from FAT32
-    0x20: ('dwTotalLogicalSectors', '<I'),
-    0x24: ('chPhysDriveNumber', 'B'),
-    0x25: ('uchCurrentHead', 'B'),
-    0x26: ('uchSignature', 'B'), # 0x28 or 0x29
-    0x27: ('dwVolumeID', '<I'),
-    0x2B: ('sVolumeLabel', '11s'),
-    0x36: ('sFSType', '8s'),
-    0x1FE: ('wBootSignature', '<H') # 55 AA
-    } # Size = 0x200 (512 byte)
-    
-    def __init__ (self, s=None, offset=0):
-        self._i = 0
-        self._pos = offset # base offset
-        self._buf = s or bytearray(512) # normal boot sector size
-        self.stream = None
-        self._kv = self.layout.copy()
-        self._vk = {} # { name: offset}
-        for k, v in self._kv.items():
-            self._vk[v[0]] = k
-        self.__init2__()
-
-    def __init2__(self):
-        if not self.wBytesPerSector: return
-        # Cluster size (bytes)
-        self.cluster = self.wBytesPerSector * self.uchSectorsPerCluster
-        # Offset of the 1st FAT copy
-        self.fatoffs = self.wSectorsCount * self.wBytesPerSector + self._pos
-        # Number of clusters represented in this FAT
-        try:
-            self.fatsize = self.dwTotalLogicalSectors/self.uchSectorsPerCluster
-        except ZeroDivisionError: # raised in FSguess if exFAT
-            pass
-        # Offset of the fixed root directory table (immediately after the FATs)
-        self.rootoffs = self.fatoffs + self.uchFATCopies * self.wSectorsPerFAT * self.wBytesPerSector + self._pos
-        # Data area offset (=cluster #2)
-        self.dataoffs = self.rootoffs + (self.wMaxRootEntries*32)
-        # Set for compatibility with FAT32 code
-        self.dwRootCluster = 0
-
-    __getattr__ = utils.common_getattr
-        
-    def __str__ (self):
-        return utils.class2str(self, "FAT12/16 Boot Sector @%x\n" % self._pos)
-
-    def pack(self):
-        "Update internal buffer"
-        for k, v in self._kv.items():
-            self._buf[k:k+struct.calcsize(v[1])] = struct.pack(v[1], getattr(self, v[0]))
-        self.__init2__()
-        return self._buf
-
-    def clusters(self):
-        "Return the number of clusters in the data area"
-        # Total sectors minus sectors preceding the data area
-        return (self.dwTotalLogicalSectors - (self.dataoffs/self.wBytesPerSector)) / self.uchSectorsPerCluster
-        
-    def cl2offset(self, cluster):
-        "Return the real offset of a cluster"
-        return self.dataoffs + (cluster-2)*self.cluster
-        
-    def root(self):
-        "Return the offset of the root directory"
-        return self.rootoffs
-
-    def fat(self, fatcopy=0):
-        "Return the offset of a FAT table (the first by default)"
-        return self.fatoffs + fatcopy * self.wSectorsPerFAT * self.wBytesPerSector
-
-
-
-def rdiv(a, b):
-    "Divide a by b eventually rounding up"
-    if a % b:
-        return a/b + 1
-    else:
-        return a/b
 
 
 
@@ -319,19 +106,19 @@ def fat12_mkfs(stream, size, sector=512, params={}):
             return -1
     else:
         # MS-inspired selection
-        if size < 2<<20:
+        if size <= 2<<20:
             fsinfo = allowed[512] # < 2M
-        elif 2<<20 < size < 4<<20:
+        elif 2<<20 < size <= 4<<20:
             fsinfo = allowed[1024]
-        elif 4<<20 < size < 8<<20:
+        elif 4<<20 < size <= 8<<20:
             fsinfo = allowed[2048]
-        elif 8<<20 < size < 16<<20:
+        elif 8<<20 < size <= 16<<20:
             fsinfo = allowed[4096]
-        elif 16<<20 < size < 32<<20:
+        elif 16<<20 < size <= 32<<20:
             fsinfo = allowed[8192] # 16M-32M
-        elif 32<<20 < size < 64<<20:
+        elif 32<<20 < size <= 64<<20:
             fsinfo = allowed[16384]
-        elif 64<<20 < size < 128<<20:
+        elif 64<<20 < size <= 128<<20:
             fsinfo = allowed[32768]
         else:
             fsinfo = allowed[65536]
@@ -352,7 +139,7 @@ def fat12_mkfs(stream, size, sector=512, params={}):
     else:
         boot.dwTotalLogicalSectors = sectors
     boot.wSectorsPerFAT = fsinfo['fat_size']/sector
-    boot.dwVolumeID = FAT.FATDirentry.GetDosDateTime(1)
+    boot.dwVolumeID = FATDirentry.GetDosDateTime(1)
     boot.sVolumeLabel = '%-11s' % 'NO NAME'
     boot.sFSType = '%-8s' % 'FAT12'
     boot.chPhysDriveNumber = 0
@@ -388,6 +175,11 @@ def fat12_mkfs(stream, size, sector=512, params={}):
     
     print "\nSTATUS: successfully applied FAT12 with following parameters:"
     pprint.pprint(fsinfo)
+
+    fat = FAT(stream, boot.fatoffs, boot.clusters(), bitsize=12)
+
+    print "\nNew file system is FAT12, %d clusters of %.1fK, root @%Xh, cluster #2 @%Xh" % (boot.clusters(),boot.cluster/1024.0,boot.root(),boot.dataoffs)
+    print fat
 
     return 0
 
@@ -463,19 +255,19 @@ def fat16_mkfs(stream, size, sector=512, params={}):
             return -1
     else:
         # MS-inspired selection
-        if size < 32<<20:
+        if size <= 32<<20:
             fsinfo = allowed[512] # < 32M
-        elif 32<<20 < size < 64<<20:
+        elif 32<<20 < size <= 64<<20:
             fsinfo = allowed[1024]
-        elif 64<<20 < size < 128<<20:
+        elif 64<<20 < size <= 128<<20:
             fsinfo = allowed[2048]
-        elif 128<<20 < size < 256<<20:
+        elif 128<<20 < size <= 256<<20:
             fsinfo = allowed[4096]
-        elif 256<<20 < size < 512<<20:
+        elif 256<<20 < size <= 512<<20:
             fsinfo = allowed[8192] # 256M-512M
-        elif 512<<20 < size < 1<<30:
+        elif 512<<20 < size <= 1<<30:
             fsinfo = allowed[16384]
-        elif 1<<30 < size < 2<<30:
+        elif 1<<30 < size <= 2<<30:
             fsinfo = allowed[32768]
         else:
             fsinfo = allowed[65536]
@@ -496,7 +288,7 @@ def fat16_mkfs(stream, size, sector=512, params={}):
     else:
         boot.dwTotalLogicalSectors = sectors
     boot.wSectorsPerFAT = fsinfo['fat_size']/sector
-    boot.dwVolumeID = FAT.FATDirentry.GetDosDateTime(1)
+    boot.dwVolumeID = FATDirentry.GetDosDateTime(1)
     boot.sVolumeLabel = '%-11s' % 'NO NAME'
     boot.sFSType = '%-8s' % 'FAT16'
     boot.chPhysDriveNumber = 0x80
@@ -532,6 +324,11 @@ def fat16_mkfs(stream, size, sector=512, params={}):
     
     print "\nSTATUS: successfully applied FAT16 with following parameters:"
     pprint.pprint(fsinfo)
+
+    fat = FAT(stream, boot.fatoffs, boot.clusters(), bitsize=16)
+
+    print "\nNew file system is FAT16, %d clusters of %.1fK, root @%Xh, cluster #2 @%Xh" % (boot.clusters(),boot.cluster/1024.0,boot.root(),boot.dataoffs)
+    print fat
 
     return 0
 
@@ -609,19 +406,19 @@ def fat32_mkfs(stream, size, sector=512, params={}):
             return fat16_mkfs(stream, size, sector, params)
     else:
         # MS-inspired selection
-        if size < 64<<20:
+        if size <= 64<<20:
             fsinfo = allowed[512] # < 64M
-        elif 64<<20 < size < 128<<20:
+        elif 64<<20 < size <= 128<<20:
             fsinfo = allowed[1024]
-        elif 128<<20 < size < 256<<20:
+        elif 128<<20 < size <= 256<<20:
             fsinfo = allowed[2048]
-        elif 256<<20 < size < 8<<30:
+        elif 256<<20 < size <= 8<<30:
             fsinfo = allowed[4096] # 256M-8G
-        elif 8<<30 < size < 16<<30:
+        elif 8<<30 < size <= 16<<30:
             fsinfo = allowed[8192]
-        elif 16<<30 < size < 32<<30:
+        elif 16<<30 < size <= 32<<30:
             fsinfo = allowed[16384]
-        elif 32<<30 < size < 2048<<30:
+        elif 32<<30 < size <= 2048<<30:
             fsinfo = allowed[32768]
         # Windows 10 supports 128K and 256K, too!
         else:
@@ -645,7 +442,7 @@ def fat32_mkfs(stream, size, sector=512, params={}):
         boot.wBootCopySector = params['backup_sectors'] # typically 6
     else:
         boot.wBootCopySector = 0
-    boot.dwVolumeID = FAT.FATDirentry.GetDosDateTime(1)
+    boot.dwVolumeID = FATDirentry.GetDosDateTime(1)
     boot.sVolumeLabel = '%-11s' % 'NO NAME'
     boot.sFSType = '%-8s' % 'FAT32'
     boot.chPhysDriveNumber = 0x80
@@ -691,33 +488,28 @@ def fat32_mkfs(stream, size, sector=512, params={}):
     print "\nSTATUS: successfully applied FAT32 with following parameters:"
     pprint.pprint(fsinfo)
 
+    fat = FAT(stream, boot.fatoffs, boot.clusters(), bitsize=32)
+
+    print "\nNew file system is:\nFAT32, %d clusters of %.1fK, root @%Xh, cluster #2 @%Xh" % (boot.clusters(),boot.cluster/1024.0,boot.root(),boot.dataoffs)
+    print fat
+
     return 0
 
 
 
 if __name__ == '__main__':
-    fssize = 1024<<20 # MB
-    # Create a blank image file
-    if 0:
-        s = bytearray(32<<20)
-        f = open('G.IMA', 'wb')
-        for i in range(fssize/len(s)):
-            f.write(s)
-        f.close()
-    dsk = disk.disk('\\\\.\\G:', 'r+b')
-    #~ dsk = disk.disk('G.ima', 'r+b')
+    if len(sys.argv) < 2:
+        print "mkfs error: you must specify a target volume to apply a FAT file system!"
+        sys.exit(1)
+
+    if os.name == 'nt' and len(sys.argv[1])==2 and sys.argv[1][1]==':':
+        disk_name = '\\\\.\\'+sys.argv[1]
+    else:
+        disk_name = sys.argv[1]
+    dsk = disk.disk(disk_name, 'r+b')
 
     params = {'reserved_size':32, 'backup_sectors':6}
-    fat32_mkfs(dsk, fssize, params=params)
+    if len(sys.argv)==3:
+        params['wanted_cluster'] = int(sys.argv[2])
 
-if __name__ == '__oldmain__':
-    fssize = 1440<<10 # 1.44MB
-    # Create a blank image file
-    if 1:
-        s = bytearray(fssize)
-        f = open('FLOPPY.IMA', 'wb')
-        f.write(s)
-        f.close()
-    dsk = disk.disk('FLOPPY.IMA', 'r+b')
-    params = {'wanted_cluster':512}
-    fat16_mkfs(dsk, fssize, params=params)
+    fat32_mkfs(dsk, dsk.size, params=params)

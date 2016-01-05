@@ -4,7 +4,6 @@ import logging
 from ctypes import *
 #~ import hexdump
 
-
 class win32_disk(object):
 	"Handles a Win32 disk"
 	open_handles = {}
@@ -19,7 +18,8 @@ class win32_disk(object):
 		assert handle != -1
 		win32_disk.open_handles[name] = handle
 		# Dismount volume, gaining exclusive access with FSCTL_DISMOUNT_VOLUME (0x90020)
-		# Dismount volume, gaining exclusive access with FSCTL_LOCK_VOLUME (0x90018)
+		# Dismount volume, locking it for exclusive access with FSCTL_LOCK_VOLUME (0x90018)
+		# IOCTL_DISK_GET_LENGTH_INFO = 0x7405C
 		# THIS IS MANDATORY FOR WRITE ACCESS! (Windows Vista+)
 		# Also it could require Admin rights for non-removable volumes!
 		# Suggest: open NON-CACHED
@@ -33,11 +33,16 @@ class win32_disk(object):
 			# 5 = ACCESS DENIED 6= INVALID HANDLE
 			if windll.kernel32.GetLastError():
 				assert 2
+		GET_LENGTH_INFORMATION = c_ulonglong(0)
+		if windll.kernel32.DeviceIoControl(handle,  0x7405C, 0, 0, byref(GET_LENGTH_INFORMATION), 8, byref(status), 0):
+			self.size = GET_LENGTH_INFORMATION.value
+		else:
+			self.size = 0
 		self.handle = handle
 		self.name = name
 		self.mode = mode
 		self.buf = create_string_buffer(4096)
-		logging.debug("Successfully opened write HANDLE to Win32 Disk %s for exclusive access", name)
+		logging.debug("Successfully opened HANDLE to Win32 Disk %s (size %d MB) for exclusive access", name, self.size/(1<<20))
 
 	def seek(self, offset, whence=0):
 		if offset != windll.kernel32.SetFilePointer(self.handle, offset, 0, whence):
@@ -97,12 +102,11 @@ class disk(object):
 	2) seek from disk's end does not work; 3) seek past disk's end followed by a read
 	returns no error."""
 	
-	def __init__(self, name, mode='rb', buffering=0, size=0):
+	def __init__(self, name, mode='rb', buffering=0):
 		self.pos = 0 # linear pos in the virtual stream
 		self.si = 0 # disk sector index
 		self.so = 0 # sector offset
 		self.lastsi = 0 # last sector read from *disk*
-		self.size = size # filesystem size (if known)
 		self.buf = None # read buffer
 		self.blocksize = 512 # fixed sector size
 		# Cache only small 512 sectors
@@ -117,8 +121,10 @@ class disk(object):
 		self.cache_tableR = {} # reversed: { cache offset:sector }
 		if os.name == 'nt' and '\\\\.\\' in name:
 			self._file = win32_disk(name, mode, buffering)
+			self.size = self._file.size
 		else:
 			self._file = open(name, mode, buffering)
+			self.size = os.stat(name).st_size
 		atexit.register(self.cache_flush)
 
 	def seek(self, offset, whence=0):
@@ -134,11 +140,6 @@ class disk(object):
 		self.si = self.pos / self.blocksize
 		self.so = self.pos % self.blocksize
 		#~ logging.debug("disk pointer to set @%Xh", self.si*self.blocksize)
-		# 3.1.16: there are corner cases when test is true, but fp is not
-		# correctly set (i.e. remains at previous sector)
-		#~ if self.si == self.lastsi:
-			#~ logging.debug("seek returning: self.si == self.lastsi == %d", self.si)
-			#~ return # does not seek if sector is the same
 		self._file.seek(self.si*self.blocksize)
 		#~ logging.debug("si=%Xh lastsi=%Xh so=%Xh", self.si,self.lastsi,self.so)
 		
@@ -205,7 +206,6 @@ class disk(object):
 			# Free space, flushing dirty sectors & updating cache index
 			self.cache_flush()
 			self.cache_index = 0
-			# 29.12.2015: reset right stream position, SINCE FLUSH MAY MODIFY IT
 			self.seek(self.pos)
 		pos = self.cache_index
 		#~ logging.debug("loading disk sector #%d into cache[%d] from offset %Xh", self.si, pos/512, self._file.tell())
@@ -391,10 +391,6 @@ if __name__ == '__main__':
 		d.write(orig)
 		d.seek(-2, 1)
 		assert orig == bytearray(d.read(2))
-
-#~ NOTA: self.pos in (direct) read deve essere aggiornato o no? A logica sì, ma fare
-#~ attenzione che le successive letture in cache avvengano dall'offset giusto del disco!
-#~ Caso tipico: la FAT12 del floppy corrotta, poiché rileggeva il settore 1 da un offset più avanzato!
 
 	print "Testing sequential writing & reading 2byte-for-2byte of 2 sectors..."
 	d.seek(3)
