@@ -9,12 +9,10 @@
 - 65,534 bytes limit for a folder?
 - use FAT32 FSInfo
 - parameters {} to tune cluster allocator?
-- avoid multiple disk objects?
 - probe Chain multiple read/write/seek ops consistency
 - reorganize seeking? calls should be reduced?
 - guard against seek beyond last valid offset (specially in FixedRoot)
 - generalize pack() in utils.py
-- implement exFAT mkfs & write support
 
 Advantages of common_getattr & pack technique in respect of property():
 - defer unpacking at effective access time
@@ -105,7 +103,7 @@ class boot_fat32(object):
     def cl2offset(self, cluster):
         "Return the real offset of a cluster"
         return self.dataoffs + (cluster-2)*self.cluster
-        
+
     def root(self):
         "Return the offset of the root directory"
         return self.cl2offset(self.dwRootCluster)
@@ -174,7 +172,7 @@ class boot_fat16(object):
     0x36: ('sFSType', '8s'),
     0x1FE: ('wBootSignature', '<H') # 55 AA
     } # Size = 0x200 (512 byte)
-    
+
     def __init__ (self, s=None, offset=0, stream=None):
         self._i = 0
         self._pos = offset # base offset
@@ -205,7 +203,7 @@ class boot_fat16(object):
         self.dwRootCluster = 0
 
     __getattr__ = utils.common_getattr
-        
+
     def __str__ (self):
         return utils.class2str(self, "FAT12/16 Boot Sector @%x\n" % self._pos)
 
@@ -220,11 +218,11 @@ class boot_fat16(object):
         "Return the number of clusters in the data area"
         # Total sectors minus sectors preceding the data area
         return (self.dwTotalLogicalSectors - (self.dataoffs/self.wBytesPerSector)) / self.uchSectorsPerCluster
-        
+
     def cl2offset(self, cluster):
         "Return the real offset of a cluster"
         return self.dataoffs + (cluster-2)*self.cluster
-        
+
     def root(self):
         "Return the offset of the root directory"
         return self.rootoffs
@@ -248,7 +246,6 @@ class FAT(object):
         self.exfat = exfat # true if exFAT
         self.reserved = 0x0FF7
         self.bad = 0x0FF7
-        #~ self.last = 0x0FF8
         self.last = 0x0FFF
         if bitsize == 32:
             self.fat_slot_size = 4
@@ -267,7 +264,7 @@ class FAT(object):
             if exfat: # EXFAT uses all 32 bits...
                 self.reserved = 0xFFFFFFF7 # ...and 7 clusters more
                 self.bad = 0xFFFFFFF7
-                self.last = 0xFFFFFFF8
+                self.last = 0xFFFFFFFF
         # maximum cluster index effectively addressable
         # clusters ranges from 2 to 2+n-1 clusters (zero based), so last valid index is n+1
         self.real_last = min(self.reserved-1, self.size+2-1)
@@ -275,7 +272,7 @@ class FAT(object):
         self.last_free_alloc = 2 # last free cluster allocated
 
     def __str__ (self):
-        return "%d-bit %sFAT table of %d clusters starting @%Xh\n" % (self.bits, ('','EX')[self.exfat], self.size, self.offset)
+        return "%d-bit %sFAT table of %d clusters starting @%Xh\n" % (self.bits, ('','ex')[self.exfat], self.size, self.offset)
 
     def __getitem__ (self, index):
         "Retrieve the value stored in a given cluster index"
@@ -297,7 +294,7 @@ class FAT(object):
             else:
                 slot = slot & 0x0FFF
         self.decoded[index] = slot
-        #~ logging.debug("Got FAT1[%Xh]=%Xh @%Xh", index, slot, pos)
+        logging.debug("Got FAT1[0x%X]=0x%X @0x%X", index, slot, pos)
         return slot
 
     # Defer write on FAT#2 allowing undelete?
@@ -306,12 +303,12 @@ class FAT(object):
         try:
             assert 2 <= index <= self.real_last
         except AssertionError:
-            logging.debug("Attempt to set invalid cluster index %Xh with value %Xh", index, value)
+            logging.debug("Attempt to set invalid cluster index 0x%X with value 0x%X", index, value)
             return
         try:
             assert value <= self.real_last or value >= self.reserved
         except AssertionError:
-            logging.debug("Attempt to set invalid value %Xh in cluster %Xh", value, index)
+            logging.debug("Attempt to set invalid value 0x%X in cluster 0x%X", value, index)
             return
         self.decoded[index] = value
         dsp = (index*self.bits)/8
@@ -330,7 +327,7 @@ class FAT(object):
                 #~ print "even", hex(value), hex(slot)
                 value = (slot & 0xF000) | value
                 #~ print hex(value), hex(slot)
-        #~ logging.debug("setting FAT1[%Xh]=%Xh @%Xh", index, value, pos)
+        logging.debug("setting FAT1[0x%X]=0x%X @0x%X", index, value, pos)
         self.stream.seek(pos)
         value = struct.pack(self.fat_slot_fmt, value)
         self.stream.write(value)
@@ -347,11 +344,11 @@ class FAT(object):
             return 1
         #~ logging.debug("invalid cluster index: %x", index)
         return 0
-        
+
     def islast(self, index):
         "Test if index is the last cluster in the chain"
         return self.last <= index <= self.last+7 # *F8 ... *FF
-        
+
     def isbad(self, index):
         "Test if index is a bad cluster"
         return index == self.bad
@@ -427,6 +424,29 @@ class FAT(object):
         logging.debug("Found the biggest run of %d clusters from #%d on %d total clusters", maxrun[1], maxrun[0], n)
         return n, maxrun
 
+    # TODO: split very large runs
+    # About 12% faster injecting a Python2 tree
+    def mark_run(self, start, count, clear=False):
+        "Mark a range of consecutive FAT16/32 clusters"
+        assert self.bits in (16, 32)
+        dsp = (start*self.bits)/8
+        pos = self.offset+dsp
+        self.stream.seek(pos)
+        if clear:
+            for i in xrange(start, start+count):
+                self.decoded[i] = 0
+            self.stream.write(bytearray((self.bits/8)*'\x00'))
+            return
+        # consecutive values to set
+        L = xrange(start+1, start+1+count)
+        for i in L:
+            self.decoded[i-1] = i
+        self.decoded[start+count-1] = self.last
+        # converted in final LE WORD/DWORD array
+        L = map(lambda x: struct.pack(self.fat_slot_fmt, x), L)
+        L[-1] = struct.pack(self.fat_slot_fmt, self.last)
+        self.stream.write(bytearray().join(L))
+
     def alloc(self, count, start=2, first=0):
         """Allocate a chain of free clusters and appropriately mark the FATs.
         Returns the first cluster or zero in case of failure"""
@@ -444,16 +464,21 @@ class FAT(object):
                 first = i # save the first cluster in the chain
             else: # if we continue a chain...
                 self[last] = i
-            while count and n:
-                self[i] = i+1
-                i += 1
-                n -= 1
-                count -= 1
-            last = i-1
-            self[last] = self.last # temporarily mark as last
-        
+            if self.bits in (16, 32):
+                self.mark_run(i, min(count, n))
+                count = 0
+                last = i + min(count, n) - 1
+            else:
+                while count and n:
+                    self[i] = i+1
+                    i += 1
+                    n -= 1
+                    count -= 1
+                last = i-1
+                self[last] = self.last # temporarily mark as last
+
         self.last_free_alloc = last
-        
+
         # If we can't allocate all required clusters...
         if count:
             #...free all the clusters we allocated
@@ -498,7 +523,7 @@ class Chain(object):
 
     def __str__ (self):
         return "Chain of %d (%d) bytes from #%Xh" % (self.filesize, self.size, self.start)
-    
+
     def maxrun4len(self, length):
         n = rdiv(length, self.boot.cluster)
         count, next = self.fat.count_run(self.lastvlcn[1], n)
@@ -507,9 +532,9 @@ class Chain(object):
         # Update (Last VCN, Next LCN) for fragment
         self.lastvlcn = (self.lastvlcn[0]+n, next)
         return maxchunk
-        
+
     def tell(self): return self.pos
-    
+
     def realtell(self):
         return self.boot.cl2offset(self.lastvlcn[1])+self.vco
 
@@ -530,7 +555,7 @@ class Chain(object):
         self.vcn = self.pos / self.boot.cluster # n-th cluster chain
         self.vco = self.pos % self.boot.cluster # offset in it
         self.realseek()
-        
+
     def realseek(self):
         #~ logging.debug("realseek with VCN=%d VCO=%d", self.vcn,self.vco)
         if self.size and self.pos >= self.size:
@@ -688,9 +713,9 @@ class FixedRoot(object):
 
     def __str__ (self):
         return "Fixed root @%Xh" % self.start
-    
+
     def tell(self): return self.pos
-    
+
     def seek(self, offset, whence=0):
         if whence == 1:
             pos = self.pos + offset
@@ -777,7 +802,7 @@ class Handle(object):
 
         # Force setting the start cluster if allocated on write
         self.Entry.Start(self.File.start)
-        
+
         if not self.Entry.IsDir():
             if self.Entry._buf[-32] == 0xE5 and self.Entry.Start():
                 #~ logging.debug("Deleted file: deallocating cluster(s)")
@@ -859,7 +884,7 @@ class FATDirentry(Direntry):
             s += struct.pack(v[1], getattr(self, v[0]))
         self._buf[-32:] = bytearray(s) # update always non-LFN part
         return self._buf
-        
+
     def __str__ (self):
         s = "FAT %sDirentry @%X\n" % ( ('','LFN ')[self.IsLfn()], self._pos )
         return utils.class2str(self, s)
@@ -989,7 +1014,7 @@ class FATDirentry(Direntry):
         cdate, ctime = self.GetDosDateTime()
 
         self._buf = bytearray(struct.pack('<11s3B7HI', shortname, 0x20, chFlags, 0, ctime, cdate, cdate, 0, ctime, cdate, 0, 0))
-        
+
         if longname:
             def pad(s, l):
                 "Pad free name space with 0xFF filler"
@@ -1078,7 +1103,7 @@ class Dirtable(object):
             self.stream = FixedRoot(boot, fat)
         else:
             self.stream = Chain(boot, fat, startcluster, (boot.cluster*fat.count(startcluster)[0], size)[size>0])
-        if startcluster not in Dirtable.dirtable: 
+        if startcluster not in Dirtable.dirtable:
             Dirtable.dirtable[startcluster] = {'LFNs':{}, 'Names':{}}
 
     def open(self, name):
@@ -1335,7 +1360,7 @@ class Dirtable(object):
         # Write new entry
         self.stream.seek(ne.Entry._pos)
         self.stream.write(ne.Entry._buf)
-        ne.IsValid = False	
+        ne.IsValid = False
         logging.debug("'%s' renamed to '%s'", name, newname)
         self._update_dirtable(ne)
         self._update_dirtable(e, True)
@@ -1398,7 +1423,7 @@ class Dirtable(object):
 
         names = d.keys()
         names.sort(by_func)
-        
+
         pos = self.findfree()
         self.stream.seek(0)
         for name in names:
