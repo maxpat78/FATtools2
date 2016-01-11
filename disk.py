@@ -101,7 +101,7 @@ class disk(object):
 	PLEASE NOTE THAT: 1) read, write and seek MUST be aligned at sector (512 bytes) offsets
 	2) seek from disk's end does not work; 3) seek past disk's end followed by a read
 	returns no error."""
-	
+
 	def __init__(self, name, mode='rb', buffering=0):
 		self.pos = 0 # linear pos in the virtual stream
 		self.si = 0 # disk sector index
@@ -142,7 +142,7 @@ class disk(object):
 		#~ logging.debug("disk pointer to set @%Xh", self.si*self.blocksize)
 		self._file.seek(self.si*self.blocksize)
 		#~ logging.debug("si=%Xh lastsi=%Xh so=%Xh", self.si,self.lastsi,self.so)
-		
+
 	def tell(self):
 		return self.pos
 
@@ -255,6 +255,7 @@ class disk(object):
 			#~ logging.debug("reading %d bytes directly from disk @%Xh", self.asize, self._file.tell())
 			self._file.readinto(self.buf)
 			# Direct read (bypass) DON'T advance lastsi? Or file pointer?
+			self.si += self.asize/self.blocksize # 11.01.2016: fix mkexfat flaw
 			self.pos += size
 			self.cache_extras += 1
 			return self.buf[self.so : self.so+size]
@@ -321,7 +322,7 @@ if __name__ == '__main__':
 	from random import randint, shuffle
 
 	open('TESTIMAGE.BIN', 'wb').write(bytearray(4<<20))
-	
+
 	d = disk('TESTIMAGE.BIN', 'r+b')
 	d.rawcache = bytearray(4<<20)
 	d.cache = memoryview(d.rawcache)
