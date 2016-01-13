@@ -4,13 +4,11 @@
 
 """ BUGS/TODO:
 - must invalidate handle to erased/replaced objects not explicitly closed!
-- handle to directories (to auto-update on closing)?
+- unique handle to directories (to auto-update on closing)?
 - pack & co.: update str += str with list join
 - 65,534 bytes limit for a folder?
 - use FAT32 FSInfo
 - parameters {} to tune cluster allocator?
-- probe Chain multiple read/write/seek ops consistency
-- reorganize seeking? calls should be reduced?
 - guard against seek beyond last valid offset (specially in FixedRoot)
 - generalize pack() in utils.py
 
@@ -1353,8 +1351,6 @@ class Dirtable(object):
         if not ne:
             logging.debug("Can't alloc new file slot for '%s'", newname)
             return 0
-        # Free its chain
-        self.fat.free(ne.Entry.Start())
         # Copy attributes from old to new slot
         ne.Entry._buf[-21:] = e._buf[-21:]
         # Write new entry
@@ -1362,7 +1358,7 @@ class Dirtable(object):
         self.stream.write(ne.Entry._buf)
         ne.IsValid = False
         logging.debug("'%s' renamed to '%s'", name, newname)
-        self._update_dirtable(ne)
+        self._update_dirtable(ne.Entry)
         self._update_dirtable(e, True)
         # Mark the old one as erased
         for i in range(0, len(e._buf), 32):
