@@ -1,6 +1,15 @@
 # -*- coding: mbcs -*-
 import utils, struct, disk, os, sys, pprint, math, locale
 
+""" FROM https://support.microsoft.com/en-us/kb/140365
+Default cluster sizes for exFAT
+The following table describes the default cluster sizes for exFAT.
+Volume size 	Windows 7, etc.
+7 MB–256 MB 	4 KB
+256 MB–32 GB 	32 KB
+32 GB–256 TB 	128 KB
+> 256 TB 	    Not supported """
+
 #~ import logging
 #~ logging.basicConfig(level=logging.DEBUG, filename='PYTEST.LOG', filemode='w')
 

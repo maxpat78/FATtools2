@@ -5,12 +5,15 @@
 DEBUG_EXFAT=0
 
 """ BUGS/TODO:
-- implement rename, trunc, frags, clean & co.
+- implement trunc, frags, clean & co.
+- implement set/clear Label (FAT too)
+- implement tree extraction (FAT too)
+- Bitmap findfree alternative?
 - set ranges of bits/fat slots at once!
 - read bitmap 128 bit at once and use math to find set/clear bits?
 - write set bit runs multiple bytes at once?
 - bitmap is FATted, so it's more slower: dict{pos:QWORD}?
-- defer Bitmap file update (allocation is really showed already by slot or FAT)
+- defer Bitmap file update (allocation is really showed already by slot or FAT)?
 - fix setting last alloced cluster (is lower than reqd?)
 - parameters {} to tune cluster allocator?
 - generalize pack() in utils.py
@@ -40,7 +43,7 @@ class boot_exfat(object):
     0x54: ('dwFATLength', '<I'), # sectors
     0x58: ('dwDataRegionOffset', '<I'), # sectors
     0x5C: ('dwDataRegionLength', '<I'),
-    0x60: ('dwRootCluster', '<I'), # First after Volume Bitmap (#2-) and UpCase Table
+    0x60: ('dwRootCluster', '<I'),
     0x64: ('dwVolumeSerial', '<I'),
     0x68: ('wFSRevision', '<H'), # 0x100 or 1.00
     # bit 0: active FAT & Bitmap (0=first, 1=second)
@@ -53,7 +56,6 @@ class boot_exfat(object):
     0x6F: ('uchDriveSelect', 'B'),
     0x70: ('uchPercentInUse', 'B'), # field not included in VBR checksum
     0x71: ('chReserved', '7s'),
-    #~ 0x72: ('chBootstrapCode', '390s'),
     0x1FE: ('wBootSignature', '<H') } # Size = 0x200 (512 byte)
 
     def __init__ (self, s=None, offset=0, stream=None):
@@ -796,6 +798,15 @@ class exFATDirentry(Direntry):
         return (wDate>>9)+1980, (wDate>>5)&0xF, wDate&0x1F, wTime>>11, (wTime>>5)&0x3F, wTime&0x1F, 0, None
 
     @staticmethod
+    def MakeDosDateTimeEx(t):
+        "Encode a tuple into a DOS datetime DWORD"
+        cdate = ((t[0]-1980) << 9) | (t[1] << 5) | (t[2]) 
+        ctime = (t[3] << 11) | (t[4] << 5) | (t[5]/2)
+        tms = 0
+        if t[5] % 2: tms += 100 # odd DOS seconds
+        return (cdate<<16 | ctime), tms
+
+    @staticmethod
     def GetDosDateTimeEx():
         "Return a tuple with a DWORD representing DOS encoding of current datetime and 10 milliseconds exFAT tuning"
         tm = datetime.now()
@@ -1201,15 +1212,17 @@ class Dirtable(object):
             logging.debug("Can't alloc new file slot for '%s'", newname)
             return 0
         # Copy attributes from old to new slot
-        # HERE WE MUST REPACK TO UPDATE NAME & GROUP HASHES
-        # SO COPYING BINARY BUFFER IS NO SENSE
-        #~ ne.Entry._buf[-21:] = e._buf[-21:]
+        for k, v in e._kv.items():
+            if k in (1, 0x23, 0x24): continue # skip chSecondaryCount, chNameLength and wNameHash
+            setattr(ne.Entry, v[0], getattr(e, v[0]))
+        ne.Entry.pack()
+        ne.IsValid = False
+        e.chEntryType = 5 # set this, or pack resets to 0x85 (Open Handle)
         # Write new entry
         self.stream.seek(ne.Entry._pos)
         self.stream.write(ne.Entry._buf)
-        ne.IsValid = False
         logging.debug("'%s' renamed to '%s'", name, newname)
-        self._update_dirtable(ne)
+        self._update_dirtable(ne.Entry)
         self._update_dirtable(e, True)
         # Mark the old one as erased
         for i in range(0, len(e._buf), 32):
@@ -1409,16 +1422,18 @@ def fat_copy_tree_inject(base, dest, callback=None, attributes=None, chunk_size=
             if attributes: # bit mask: 1=preserve creation time, 2=last modification, 3=last access
                 if attributes & 1:
                     tm = time.localtime(st.st_ctime)
-                    dst.Entry.wCDate = FATDirentry.MakeDosDate((tm.tm_year, tm.tm_mon, tm.tm_mday))
-                    dst.Entry.wCTime = FATDirentry.MakeDosTime((tm.tm_hour, tm.tm_min, tm.tm_sec))
-
+                    dw, ms = exFATDirentry.MakeDosDateTimeEx((tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec))
+                    dst.Entry.dwCTime = dw
+                    dst.chmsCTime = ms
                 if attributes & 2:
                     tm = time.localtime(st.st_mtime)
-                    dst.Entry.wMDate = FATDirentry.MakeDosDate((tm.tm_year, tm.tm_mon, tm.tm_mday))
-                    dst.Entry.wMTime = FATDirentry.MakeDosTime((tm.tm_hour, tm.tm_min, tm.tm_sec))
+                    dw, ms = exFATDirentry.MakeDosDateTimeEx((tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec))
+                    dst.Entry.dwMTime = dw
+                    dst.chmsCTime = ms
 
                 if attributes & 4:
                     tm = time.localtime(st.st_atime)
-                    dst.Entry.wADate = FATDirentry.MakeDosDate((tm.tm_year, tm.tm_mon, tm.tm_mday))
-                    dst.Entry.wATime = FATDirentry.MakeDosTime((tm.tm_hour, tm.tm_min, tm.tm_sec))
+                    dw, ms = exFATDirentry.MakeDosDateTimeEx((tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec))
+                    dst.Entry.dwATime = dw
+                    dst.chmsCTime = ms
             dst.close()
