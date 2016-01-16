@@ -1,5 +1,6 @@
 # -*- coding: mbcs -*-
-import utils, struct, disk, os, sys, pprint, math, locale
+import utils, struct, disk, os, sys, math
+#~ import pprint
 
 """ FROM https://support.microsoft.com/en-us/kb/140365
 Default cluster sizes for exFAT
@@ -66,15 +67,19 @@ nodos_asm_78h = '\xB8\xC0\x07\x8E\xD8\xBE\x93\x00\xAC\x08\xC0\x74\x0A\xB4\x0E\xB
 #
 #~ A backup copy of these 12 sectors must follow immediately.
 #
-#~ Then the FAT region (it has not to be consecutive to the previous region), with a
-#~ single FAT (except in the - actually unsupported- T-exFAT).
+#~ Then the FAT region with a single FAT (except in the -actually unsupported-
+#~ T-exFAT). It hasn't to be consecutive to the previous region; however, it can't
+#~ legally lay inside the clusters heap (like NTFS $MFT) nor after it.
 #
-#~ Finally, the Data region with the clusters heap (again, it can reside far from FAT area)
-#~ where the root directory is located.
+#~ Finally, the Data region (again, it can reside far from FAT area) where the
+#~ root directory is located.
 #
-#~ But the root directory must contain:
-#~ - a Bitmap file, where allocated clusters are set (typically from cluster #2);
-#~ - an Up-Case file (compressed or uncompressed) for Unicode file name comparisons.
+#~ But the root directory must contain (and is normally preceeded by):
+#~ - a special Bitmap file, where allocated clusters are set;
+#~ - a special Up-Case file (compressed or uncompressed) for Unicode file name
+#~   comparisons.
+#~ Those are "special" since marked with single slots of special types (0x81, 0x82)
+#~ instead of standard file/directory slots group (0x85, 0xC0, 0xC1).
 #
 #~ FAT is set and valid only for fragmented files. However, it must be always set for
 #~ Root, Bitmap and Up-Case, even if contiguous.
@@ -149,6 +154,7 @@ def exfat_mkfs(stream, size, sector=512, params={}):
             return -1
     else:
         # MS-inspired selection
+        # Fix it to use cluster size up to 32MB
         if size < 64<<20:
             fsinfo = allowed[512] # < 64M
         elif 64<<20 < size <= 128<<20:
@@ -163,9 +169,12 @@ def exfat_mkfs(stream, size, sector=512, params={}):
             fsinfo = allowed[16384]
         elif 32<<30 < size <= 2048<<30:
             fsinfo = allowed[32768]
-        # Windows 10 supports 128K and 256K, too!
-        else:
+        elif 2048<<30 < size <= 8192<<30:
             fsinfo = allowed[65536]
+        elif 2048<<30 < size <= 256<<40:
+            fsinfo = allowed[128<<10]
+        else:
+            fsinfo = allowed[256<<10]
 
     boot = boot_exfat()
     boot.chJumpInstruction = '\xEB\x76\x90' # JMP opcode is mandatory, or CHKDSK won't recognize filesystem!

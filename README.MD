@@ -15,11 +15,25 @@ Actually, following features are implemented (mostly in Python, with a few ctype
 - file fragmentation calculator
 - mkfat/exfat tool to properly apply a FAT12/16/32 or exFAT filesystem to a block device (file or disk) and let CHKDSK be happy with it (included exFAT compressed Up-Case table generator)
 
-exFAT support actually lacks some minor functionalities (rename, sort, etc.).
-
-Obviously, since a filesystem is an extremely complex and delicate matter, and big bugs may lay around, you'll USE IT TOTALLY AT YOUR OWN RISK!
+*Obviously, since a filesystem is an extremely complex and delicate matter, and big bugs may lay around, you'll USE IT TOTALLY AT YOUR OWN RISK!*
 
 The most fragile area (and, thus, subject to bugs) is the caching mechanism, that operates in different ways:
 - intercepting small I/O (<= 512 bytes), which is cached in a small buffer. Bigger I/O bypasses the cache; when the cache is full, all dirty sectors are committed to disk and the cache buffer is zeroed. Sectors and buffers are paired with Python builtin dictionaries: this permits a good (from a Pythonic perspective) I/O speed during FAT and directory tables access;
 - mantaining a dictionary of pre-decoded FAT indexes, to improve the speed of repetitive access to cluster chains;
 - mantaining a dictionary of short and long names (paired with their respective directory slots) for each directory table, to speed up searches and updates in directory tables.
+
+Sample usage:
+```
+# -*- coding: mbcs -*-
+from FAT import *
+
+# Assuming we have DirA, DirB, DirC in this disk order into X:
+root =opendisk('X:', 'r+b')
+
+dirlist='''DirB
+DirC
+DirA'''
+
+root._sortby.fix = dirlist.split('\n')
+root.sort(dt._sortby)
+```
