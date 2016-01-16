@@ -2,6 +2,9 @@
 import utils, struct, disk, os, sys, pprint
 from FAT import *
 
+""" BUGS/TODO:
+- implement mkfs for floppies, at least common formats
+"""
 """ FROM https://support.microsoft.com/en-us/kb/140365
 
 Default cluster sizes for FAT32
@@ -42,7 +45,7 @@ nodos_asm_5Ah = '\xB8\xC0\x07\x8E\xD8\xBE\x73\x00\xAC\x08\xC0\x74\x09\xB4\x0E\xB
 def fat12_mkfs(stream, size, sector=512, params={}):
     "Make a FAT12 File System on stream. Returns 0 for success."
     sectors = size/sector
-    
+
     if sectors < 16 or sectors > 0xFFFFFFFF:
         return 1
 
@@ -63,7 +66,7 @@ def fat12_mkfs(stream, size, sector=512, params={}):
         root_entries = 224
 
     reserved_size += root_entries*32 # in FAT12/16 this space resides outside the cluster area
-    
+
     allowed = {} # {cluster_size : fsinfo}
 
     for i in range(9, 17): # cluster sizes 0.5K...64K
@@ -93,8 +96,8 @@ def fat12_mkfs(stream, size, sector=512, params={}):
         print "ERROR: can't apply any FAT12/16/32 format!"
         return 1
 
-    print "* MKFS FAT12 INFO: allowed combinations for cluster size:"
-    pprint.pprint(allowed)
+    #~ print "* MKFS FAT12 INFO: allowed combinations for cluster size:"
+    #~ pprint.pprint(allowed)
 
     fsinfo = None
 
@@ -172,14 +175,15 @@ def fat12_mkfs(stream, size, sector=512, params={}):
     # Blank root at fixed offset
     stream.seek(boot.root())
     stream.write(bytearray(boot.wMaxRootEntries*32))
-    
-    print "\nSTATUS: successfully applied FAT12 with following parameters:"
-    pprint.pprint(fsinfo)
 
-    fat = FAT(stream, boot.fatoffs, boot.clusters(), bitsize=12)
+    sizes = {1:'B', 10:'KiB',20:'MiB',30:'GiB',40:'TiB',50:'EiB'}
+    k = 0
+    for k in sorted(sizes):
+        if (fsinfo['required_size'] / (1<<k)) < 1024: break
 
-    print "\nNew file system is FAT12, %d clusters of %.1fK, root @%Xh, cluster #2 @%Xh" % (boot.clusters(),boot.cluster/1024.0,boot.root(),boot.dataoffs)
-    print fat
+    free_clusters = fsinfo['clusters'] # root is outside clusters heap
+    print "Successfully applied FAT12 to a %d %s volume.\n%d clusters of %.1f KB.\n%d %s free in %d clusters." % (fsinfo['required_size']/(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/(1<<k), sizes[k], free_clusters)
+    print "\nFAT #1 @0x%X, Data Region @0x%X, Root @0x%X" % (boot.fatoffs, boot.cl2offset(2), boot.root())
 
     return 0
 
@@ -188,7 +192,7 @@ def fat12_mkfs(stream, size, sector=512, params={}):
 def fat16_mkfs(stream, size, sector=512, params={}):
     "Make a FAT16 File System on stream. Returns 0 for success."
     sectors = size/sector
-    
+
     if sectors < 16 or sectors > 0xFFFFFFFF:
         return 1
 
@@ -242,8 +246,8 @@ def fat16_mkfs(stream, size, sector=512, params={}):
             return fat12_mkfs(stream, size, sector, params)
         return 1
 
-    print "* MKFS FAT16 INFO: allowed combinations for cluster size:"
-    pprint.pprint(allowed)
+    #~ print "* MKFS FAT16 INFO: allowed combinations for cluster size:"
+    #~ pprint.pprint(allowed)
 
     fsinfo = None
 
@@ -321,14 +325,15 @@ def fat16_mkfs(stream, size, sector=512, params={}):
     # Blank root at fixed offset
     stream.seek(boot.root())
     stream.write(bytearray(boot.wMaxRootEntries*32))
-    
-    print "\nSTATUS: successfully applied FAT16 with following parameters:"
-    pprint.pprint(fsinfo)
 
-    fat = FAT(stream, boot.fatoffs, boot.clusters(), bitsize=16)
+    sizes = {1:'B', 10:'KiB',20:'MiB',30:'GiB',40:'TiB',50:'EiB'}
+    k = 0
+    for k in sorted(sizes):
+        if (fsinfo['required_size'] / (1<<k)) < 1024: break
 
-    print "\nNew file system is FAT16, %d clusters of %.1fK, root @%Xh, cluster #2 @%Xh" % (boot.clusters(),boot.cluster/1024.0,boot.root(),boot.dataoffs)
-    print fat
+    free_clusters = fsinfo['clusters'] # root is outside clusters heap
+    print "Successfully applied FAT16 to a %d %s volume.\n%d clusters of %.1f KB.\n%d %s free in %d clusters." % (fsinfo['required_size']/(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/(1<<k), sizes[k], free_clusters)
+    print "\nFAT #1 @0x%X, Data Region @0x%X, Root @0x%X" % (boot.fatoffs, boot.cl2offset(2), boot.root())
 
     return 0
 
@@ -348,7 +353,7 @@ def fat32_mkfs(stream, size, sector=512, params={}):
 #~ again, we'll waste FAT space and, more important, CHKDSK won't recognize it!
 
     sectors = size/sector
-    
+
     if sectors > 0xFFFFFFFF: # switch to exFAT where available
         return -1
 
@@ -393,8 +398,8 @@ def fat32_mkfs(stream, size, sector=512, params={}):
             print "Too many clusters to apply FAT32: aborting."
             return -1
 
-    print "* MKFS FAT32 INFO: allowed combinations for cluster size:"
-    pprint.pprint(allowed)
+    #~ print "* MKFS FAT32 INFO: allowed combinations for cluster size:"
+    #~ pprint.pprint(allowed)
 
     fsinfo = None
 
@@ -484,14 +489,17 @@ def fat32_mkfs(stream, size, sector=512, params={}):
     # Blank root at cluster #2
     stream.seek(boot.root())
     stream.write(bytearray(boot.cluster))
-    
-    print "\nSTATUS: successfully applied FAT32 with following parameters:"
-    pprint.pprint(fsinfo)
 
-    fat = FAT(stream, boot.fatoffs, boot.clusters(), bitsize=32)
+    #~ fat = FAT(stream, boot.fatoffs, boot.clusters(), bitsize=32)
 
-    print "\nNew file system is:\nFAT32, %d clusters of %.1fK, root @%Xh, cluster #2 @%Xh" % (boot.clusters(),boot.cluster/1024.0,boot.root(),boot.dataoffs)
-    print fat
+    sizes = {1:'B', 10:'KiB',20:'MiB',30:'GiB',40:'TiB',50:'EiB'}
+    k = 0
+    for k in sorted(sizes):
+        if (fsinfo['required_size'] / (1<<k)) < 1024: break
+
+    free_clusters = fsinfo['clusters'] - 1
+    print "Successfully applied FAT32 to a %d %s volume.\n%d clusters of %.1f KB.\n%d %s free in %d clusters." % (fsinfo['required_size']/(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/(1<<k), sizes[k], free_clusters)
+    print "\nFAT #1 @0x%X, Data Region @0x%X, Root (cluster #%d) @0x%X" % (boot.fatoffs, boot.cl2offset(2), 2, boot.cl2offset(2))
 
     return 0
 
