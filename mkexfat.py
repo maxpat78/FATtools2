@@ -1,4 +1,3 @@
-# -*- coding: mbcs -*-
 import utils, struct, disk, os, sys, math
 #~ import pprint
 
@@ -6,9 +5,9 @@ import utils, struct, disk, os, sys, math
 Default cluster sizes for exFAT
 The following table describes the default cluster sizes for exFAT.
 Volume size 	Windows 7, etc.
-7 MB–256 MB 	4 KB
-256 MB–32 GB 	32 KB
-32 GB–256 TB 	128 KB
+7 MB-256 MB 	4 KB
+256 MB-32 GB 	32 KB
+32 GB-256 TB 	128 KB
 > 256 TB 	    Not supported """
 
 #~ import logging
@@ -296,7 +295,7 @@ def exfat_mkfs(stream, size, sector=512, params={}):
     root.stream.write(bitmap.pack())
     root.stream.write(upcase.pack())
 
-    sizes = {1:'B', 10:'KiB',20:'MiB',30:'GiB',40:'TiB',50:'EiB'}
+    sizes = {0:'B', 10:'KiB',20:'MiB',30:'GiB',40:'TiB',50:'EiB'}
     k = 0
     for k in sorted(sizes):
         if (fsinfo['required_size'] / (1<<k)) < 1024: break
