@@ -1,28 +1,13 @@
-# -*- coding: mbcs -*-
 # Utilities to manage a FAT12/16/32 file system
 #
 
-""" BUGS/TODO:
-- must invalidate handle to erased/replaced objects not explicitly closed!
-- unique handle to directories (to auto-update on closing)?
-- pack & co.: update str += str with list join
-- 65,534 bytes limit for a folder?
-- use FAT32 FSInfo
-- parameters {} to tune cluster allocator?
-- guard against seek beyond last valid offset (specially in FixedRoot)
-- generalize pack() in utils.py
-
-Advantages of common_getattr & pack technique in respect of property():
-- defer unpacking at effective access time
-- unpack *once* only what needed
-- pack *once* the full buffer"""
 import copy, os, struct, time, cStringIO, atexit
 from datetime import datetime
 import logging
 
 import disk, utils
 
-
+DEBUG_FAT=1
 
 class boot_fat32(object):
     "FAT32 Boot Sector"
@@ -277,7 +262,7 @@ class FAT(object):
         try:
             assert 2 <= index <= self.real_last
         except AssertionError:
-            logging.debug("Attempt to read unexistant FAT index #%d", index)
+            if DEBUG_FAT: logging.debug("Attempt to read unexistant FAT index #%d", index)
             return self.last
         slot = self.decoded.get(index)
         if slot: return slot
@@ -292,7 +277,7 @@ class FAT(object):
             else:
                 slot = slot & 0x0FFF
         self.decoded[index] = slot
-        logging.debug("Got FAT1[0x%X]=0x%X @0x%X", index, slot, pos)
+        if DEBUG_FAT: logging.debug("Got FAT1[0x%X]=0x%X @0x%X", index, slot, pos)
         return slot
 
     # Defer write on FAT#2 allowing undelete?
@@ -301,12 +286,12 @@ class FAT(object):
         try:
             assert 2 <= index <= self.real_last
         except AssertionError:
-            logging.debug("Attempt to set invalid cluster index 0x%X with value 0x%X", index, value)
+            if DEBUG_FAT: logging.debug("Attempt to set invalid cluster index 0x%X with value 0x%X", index, value)
             return
         try:
             assert value <= self.real_last or value >= self.reserved
         except AssertionError:
-            logging.debug("Attempt to set invalid value 0x%X in cluster 0x%X", value, index)
+            if DEBUG_FAT: logging.debug("Attempt to set invalid value 0x%X in cluster 0x%X", value, index)
             return
         self.decoded[index] = value
         dsp = (index*self.bits)/8
@@ -325,7 +310,7 @@ class FAT(object):
                 #~ print "even", hex(value), hex(slot)
                 value = (slot & 0xF000) | value
                 #~ print hex(value), hex(slot)
-        logging.debug("setting FAT1[0x%X]=0x%X @0x%X", index, value, pos)
+        if DEBUG_FAT: logging.debug("setting FAT1[0x%X]=0x%X @0x%X", index, value, pos)
         self.stream.seek(pos)
         value = struct.pack(self.fat_slot_fmt, value)
         self.stream.write(value)
@@ -340,7 +325,7 @@ class FAT(object):
         # Inline explicit test avoiding func call to speed-up
         if (index >= 2 and index <= self.real_last) or self.islast(index) or self.isbad(index):
             return 1
-        #~ logging.debug("invalid cluster index: %x", index)
+        if DEBUG_FAT: logging.debug("invalid cluster index: %x", index)
         return 0
 
     def islast(self, index):
@@ -404,7 +389,7 @@ class FAT(object):
                     if n == count: break # stop search if we got the required amount
                 break
             start += 1
-        #~ logging.debug("found %d free clusters from #%x", n, i)
+        if DEBUG_FAT: logging.debug("found %d free clusters from #%x", n, i)
         return i, n
 
     def findmaxrun(self):
@@ -415,11 +400,11 @@ class FAT(object):
         while 1:
             t = self.findfree(t[0]+1)
             if t[0] < 0: break
-            logging.debug("Found %d free clusters from #%d", t[1], t[0])
+            if DEBUG_FAT: logging.debug("Found %d free clusters from #%d", t[1], t[0])
             maxrun = max(t, maxrun, key=lambda x:x[1])
             n += t[1]
             t = (t[0]+t[1], t[1])
-        logging.debug("Found the biggest run of %d clusters from #%d on %d total clusters", maxrun[1], maxrun[0], n)
+        if DEBUG_FAT: logging.debug("Found the biggest run of %d clusters from #%d on %d total clusters", maxrun[1], maxrun[0], n)
         return n, maxrun
 
     # TODO: split very large runs
@@ -448,15 +433,17 @@ class FAT(object):
     def alloc(self, count, start=2, first=0):
         """Allocate a chain of free clusters and appropriately mark the FATs.
         Returns the first cluster or zero in case of failure"""
-        #~ logging.debug("request to allocate %d clusters from #%Xh(%d), search from #%Xh", count, start, start, self.last_free_alloc)
+        if DEBUG_FAT: logging.debug("request to allocate %d clusters from #%Xh(%d), search from #%Xh", count, start, start, self.last_free_alloc)
 
         last = start
 
         while count:
             i, n = self.findfree(self.last_free_alloc, count)
+            if DEBUG_FAT: logging.debug("(1) findfree(%Xh, %d) returned (%Xh, %d)", self.last_free_alloc, count, i, n)
             if i < 0 and self.last_free_alloc > 2:
                 self.last_free_alloc = 2 # retry search
                 i, n = self.findfree(self.last_free_alloc, count)
+                if DEBUG_FAT: logging.debug("(2) findfree(%Xh, %d) returned (%Xh, %d)", self.last_free_alloc, count, i, n)
             if i < 0: break # no more free clusters
             if not first:
                 first = i # save the first cluster in the chain
@@ -464,8 +451,8 @@ class FAT(object):
                 self[last] = i
             if self.bits in (16, 32):
                 self.mark_run(i, min(count, n))
-                count = 0
                 last = i + min(count, n) - 1
+                count -= n
             else:
                 while count and n:
                     self[i] = i+1
@@ -480,23 +467,23 @@ class FAT(object):
         # If we can't allocate all required clusters...
         if count:
             #...free all the clusters we allocated
-            logging.debug("FATAL: couldn't allocate %d more clusters", count)
+            if DEBUG_FAT: logging.debug("FATAL: couldn't allocate %d more clusters", count)
             self.free(first)
             return 0
-        #~ logging.debug("clusters successfully allocated from %Xh", first)
+        if DEBUG_FAT: logging.debug("clusters successfully allocated from %Xh", first)
         #~ print first, last
         return first
 
     def free(self, start):
         "Free a clusters chain"
-        #~ logging.debug("freeing cluster chain from %Xh", start)
+        if DEBUG_FAT: logging.debug("freeing cluster chain from %Xh", start)
         while not (self.last <= self[start] <= self.last+7): # islast
             prev = start
             start = self[start]
             self[prev] = 0
-            #~ logging.debug("freed cluster %x", prev)
+            if DEBUG_FAT: logging.debug("freed cluster %x", prev)
         self[start] = 0
-        #~ logging.debug("freed last cluster %Xh", start)
+        if DEBUG_FAT: logging.debug("freed last cluster %Xh", start)
 
 
 class Chain(object):
@@ -517,7 +504,7 @@ class Chain(object):
         # Virtual Cluster Offset (current offset in VCN)
         self.vco = -1
         self.lastvlcn = (0, cluster) # last cluster VCN & LCN
-        #~ logging.debug("Cluster chain of %d%sbytes (%d bytes) @%Xh", self.filesize, (' ', ' contiguous ')[nofat], self.size, cluster)
+        if DEBUG_FAT: logging.debug("Cluster chain of %d%sbytes (%d bytes) @%Xh", self.filesize, (' ', ' contiguous ')[nofat], self.size, cluster)
 
     def __str__ (self):
         return "Chain of %d (%d) bytes from #%Xh" % (self.filesize, self.size, self.start)
@@ -526,7 +513,7 @@ class Chain(object):
         n = rdiv(length, self.boot.cluster)
         count, next = self.fat.count_run(self.lastvlcn[1], n)
         maxchunk = count * self.boot.cluster
-        #~ logging.debug("maxrun4len: run of %d bytes (%d clusters) from VCN #%d (first,next LCN=%Xh,%Xh)", maxchunk, n, self.lastvlcn[0], self.lastvlcn[1], next)
+        if DEBUG_FAT: logging.debug("maxrun4len: run of %d bytes (%d clusters) from VCN #%d (first,next LCN=%Xh,%Xh)", maxchunk, n, self.lastvlcn[0], self.lastvlcn[1], next)
         # Update (Last VCN, Next LCN) for fragment
         self.lastvlcn = (self.lastvlcn[0]+n, next)
         return maxchunk
@@ -549,15 +536,15 @@ class Chain(object):
             clusters = rdiv(self.pos, self.boot.cluster)
             self.start = self.fat.alloc(clusters)
             self.size = clusters * self.boot.cluster
-            #~ logging.debug("Chain.seek:allocated %d clusters from #%Xh seeking %X", clusters, self.start, self.pos)
+            if DEBUG_FAT: logging.debug("Chain.seek:allocated %d clusters from #%Xh seeking %X", clusters, self.start, self.pos)
         self.vcn = self.pos / self.boot.cluster # n-th cluster chain
         self.vco = self.pos % self.boot.cluster # offset in it
         self.realseek()
 
     def realseek(self):
-        #~ logging.debug("realseek with VCN=%d VCO=%d", self.vcn,self.vco)
+        if DEBUG_FAT: logging.debug("realseek with VCN=%d VCO=%d", self.vcn,self.vco)
         if self.size and self.pos >= self.size:
-            #~ logging.debug("%s: detected chain end at VCN #%d while seeking", self, self.vcn)
+            if DEBUG_FAT: logging.debug("%s: detected chain end at VCN #%d while seeking", self, self.vcn)
             self.vcn = -1
             return
         if self.nofat:
@@ -583,11 +570,11 @@ class Chain(object):
             #~ if self.fat.islast(cluster):
             if (self.fat.last <= cluster <= self.fat.last+7):
                 self.vcn = -1
-        #~ logging.debug("realseek seeking VCN=%d LCN=%Xh [%Xh:] @%Xh", self.vcn, cluster, self.vco, self.boot.cl2offset(cluster))
+        if DEBUG_FAT: logging.debug("realseek seeking VCN=%d LCN=%Xh [%Xh:] @%Xh", self.vcn, cluster, self.vco, self.boot.cl2offset(cluster))
         self.stream.seek(self.boot.cl2offset(cluster)+self.vco)
 
     def read(self, size=-1):
-        #~ logging.debug("read(%d) called from offset %Xh", size, self.pos)
+        if DEBUG_FAT: logging.debug("read(%d) called from offset %Xh", size, self.pos)
         self.seek(self.pos)
         # If negative size, set it to file size
         if size < 0:
@@ -602,7 +589,7 @@ class Chain(object):
                 return buf
             buf += self.stream.read(size)
             self.pos += size
-            #~ logging.debug("read %d contiguous bytes, VCN=%Xh[%Xh:]", len(buf), self.vcn, self.vco)
+            if DEBUG_FAT: logging.debug("read %d contiguous bytes, VCN=%Xh[%Xh:]", len(buf), self.vcn, self.vco)
             return buf
         while 1:
             if not size or self.vcn == -1:
@@ -612,19 +599,19 @@ class Chain(object):
             size -= n
             self.pos += n
             self.seek(self.pos)
-        #~ logging.debug("read %d byte, VCN=%Xh[%Xh:]", len(buf), self.vcn, self.vco)
+        if DEBUG_FAT: logging.debug("read %d byte, VCN=%Xh[%Xh:]", len(buf), self.vcn, self.vco)
         return buf
 
     def write(self, s):
         self.seek(self.pos)
-        #~ logging.debug("Chain.write(buf[:%d]) called from offset %Xh, VCN=%Xh[%Xh:]", len(s), self.pos, self.vcn, self.vco)
+        if DEBUG_FAT: logging.debug("Chain.write(buf[:%d]) called from offset %Xh, VCN=%Xh[%Xh:]", len(s), self.pos, self.vcn, self.vco)
         new_allocated = 0
         if self.pos + len(s) > self.size:
             # Alloc more clusters from actual last one
             reqb = self.pos + len(s) - self.size
             reqc = rdiv(reqb, self.boot.cluster)
-            #~ logging.debug("pos=%X(%d), len=%d, size=%d(%Xh)", self.pos, self.pos, len(s), self.size, self.size)
-            #~ logging.debug("needed %d bytes (%d clusters) more to continue writing", reqb, reqc)
+            if DEBUG_FAT: logging.debug("pos=%X(%d), len=%d, size=%d(%Xh)", self.pos, self.pos, len(s), self.size, self.size)
+            if DEBUG_FAT: logging.debug("needed %d bytes (%d clusters) more to continue writing", reqb, reqc)
             if self.start:
                 lastc = self.fat.count(self.start)[1]
                 self.fat.alloc(reqc, lastc, lastc) # first=lastc since we continue the chain
@@ -639,7 +626,7 @@ class Chain(object):
         i = 0
         btoe = self.boot.cluster - self.vco # bytes to cluster's end
         if len(s) > btoe:
-            #~ logging.debug("writing %d bytes to end of cluster", btoe)
+            if DEBUG_FAT: logging.debug("writing %d bytes to end of cluster", btoe)
             self.seek(self.pos)
             self.stream.write(s[:btoe])
             self.pos += btoe
@@ -651,7 +638,7 @@ class Chain(object):
             self.stream.write(s[i:i+n])
             self.pos += n
             i += n
-            #~ logging.debug("written s[%d:%d] for %d contiguous bytes (todo=%d)", i-n, i, n, len(s)-i)
+            if DEBUG_FAT: logging.debug("written s[%d:%d] for %d contiguous bytes (todo=%d)", i-n, i, n, len(s)-i)
         # file size is the top pos reached during write
         self.filesize = max(self.filesize, self.pos)
         self.seek(self.pos)
@@ -660,19 +647,19 @@ class Chain(object):
         # an empty slot is set to NULL
         if new_allocated:
             if self.pos < self.size:
-                #~ logging.debug("blanking newly allocated cluster tip, %d bytes @%Xh", self.size-self.pos, self.pos)
+                if DEBUG_FAT: logging.debug("blanking newly allocated cluster tip, %d bytes @%Xh", self.size-self.pos, self.pos)
                 self.stream.write(bytearray(self.size - self.pos))
 
     def trunc(self):
         "Truncate the chain to actual offset, freeing subsequent clusters accordingly"
-        logging.debug("called trunc() on %s @%d", self, self.pos)
+        if DEBUG_FAT: logging.debug("called trunc() on %s @%d", self, self.pos)
         n = (self.size-self.pos)/self.boot.cluster # number of clusters to free
         end = self.size/self.boot.cluster - n - 1# new last cluster
         if end < 0:
-            logging.debug("trunc() returned 0, end<0")
+            if DEBUG_FAT: logging.debug("trunc() returned 0, end<0")
             return 0
         st = self.fat.count_to(self.start, end)
-        logging.debug("Truncating %s to %d by %d clusters (#%Xh new last cluster)", self, self.pos, n, st)
+        if DEBUG_FAT: logging.debug("Truncating %s to %d by %d clusters (#%Xh new last cluster)", self, self.pos, n, st)
         if n:
             # Free the chain from next to last
             self.fat.free(self.fat[st])
@@ -684,17 +671,17 @@ class Chain(object):
         return 1
 
     def frags(self):
-        logging.debug("Fragmentation of %s", self)
+        if DEBUG_FAT: logging.debug("Fragmentation of %s", self)
         runs = 0
         start = self.start
         while 1:
             length, next = self.fat.count_run(start)
             if next == start: break
             runs += 1
-            logging.debug("Run of %d clusters from %Xh (next=%Xh)", length, start, next)
+            if DEBUG_FAT: logging.debug("Run of %d clusters from %Xh (next=%Xh)", length, start, next)
             start = next
-        logging.debug("Detected %d fragments for %d clusters", runs, self.size/self.boot.cluster)
-        logging.debug("Fragmentation is %f", float(runs-1) / float(self.size/self.boot.cluster))
+        if DEBUG_FAT: logging.debug("Detected %d fragments for %d clusters", runs, self.size/self.boot.cluster)
+        if DEBUG_FAT: logging.debug("Fragmentation is %f", float(runs-1) / float(self.size/self.boot.cluster))
         return runs
 
 
@@ -723,13 +710,13 @@ class FixedRoot(object):
         else:
             pos = offset
         if pos > self.size:
-            logging.debug("Attempt to seek @%Xh past fixed root end @%Xh", pos, self.size)
+            if DEBUG_FAT: logging.debug("Attempt to seek @%Xh past fixed root end @%Xh", pos, self.size)
             return
         self.pos = pos
         self.stream.seek(self.start+pos)
 
     def read(self, size=-1):
-        #~ logging.debug("read(%d) called from offset %Xh", size, self.pos)
+        if DEBUG_FAT: logging.debug("read(%d) called from offset %Xh", size, self.pos)
         self.seek(self.pos)
         # If negative size, adjust
         if size < 0:
@@ -803,21 +790,21 @@ class Handle(object):
 
         if not self.Entry.IsDir():
             if self.Entry._buf[-32] == 0xE5 and self.Entry.Start():
-                #~ logging.debug("Deleted file: deallocating cluster(s)")
+                if DEBUG_FAT: logging.debug("Deleted file: deallocating cluster(s)")
                 self.File.fat.free(self.Entry.Start())
                 return
 
             self.Entry.dwFileSize = self.File.filesize
             # Free cluster allocated if empty at last
             if not self.Entry.dwFileSize and self.Entry.Start():
-                #~ logging.debug("Empty file: deallocating cluster(s)")
+                if DEBUG_FAT: logging.debug("Empty file: deallocating cluster(s)")
                 self.File.fat.free(self.Entry.Start())
                 self.Entry.wClusterHi = 0
                 self.Entry.wClusterLo = 0
 
         self.Dir.stream.seek(self.Entry._pos)
-        #~ logging.debug('Closing Handle @%Xh(%Xh) to "%s", cluster=%Xh tell=%d chain=%d size=%d', \
-        #~ self.Entry._pos, self.Dir.stream.realtell(), os.path.join(self.Dir.path,self.Entry.Name()), self.Entry.Start(), self.File.pos, self.File.size, self.File.filesize)
+        if DEBUG_FAT: logging.debug('Closing Handle @%Xh(%Xh) to "%s", cluster=%Xh tell=%d chain=%d size=%d', \
+        self.Entry._pos, self.Dir.stream.realtell(), os.path.join(self.Dir.path,self.Entry.Name()), self.Entry.Start(), self.File.pos, self.File.size, self.File.filesize)
         self.Dir.stream.write(self.Entry.pack())
         self.IsValid = False
 
@@ -1144,7 +1131,7 @@ class Dirtable(object):
                 continue
             found = None
             break
-        #~ if found: logging.debug("opened directory table '%s' @%Xh (cluster %Xh)", found.path, self.boot.cl2offset(found.start), found.start)
+        if DEBUG_FAT and found: logging.debug("opened directory table '%s' @%Xh (cluster %Xh)", found.path, self.boot.cl2offset(found.start), found.start)
         return found
 
     def _alloc(self, name, clusters=0):
@@ -1183,22 +1170,22 @@ class Dirtable(object):
         self.stream.write(handle.Entry.pack())
         handle.Dir = self
         self._update_dirtable(handle.Entry)
-        #~ logging.debug("Created new file '%s' @%Xh", name, handle.File.start)
+        if DEBUG_FAT: logging.debug("Created new file '%s' @%Xh", name, handle.File.start)
         return handle
 
     def mkdir(self, name):
         "Create a new directory slot, allocating the new directory table"
         r = self.opendir(name)
         if r:
-            #~ logging.debug("mkdir('%s') failed, entry already exists!", name)
+            if DEBUG_FAT: logging.debug("mkdir('%s') failed, entry already exists!", name)
             return r
         # Check if it is a supported name (=at most LFN)
         if not FATDirentry.IsValidDosName(name, True):
-            #~ logging.debug("mkdir('%s') failed, name contains invalid chars!", name)
+            if DEBUG_FAT: logging.debug("mkdir('%s') failed, name contains invalid chars!", name)
             return None
         handle = self._alloc(name, 1)
         self.stream.seek(handle.Entry._pos)
-        #~ logging.debug("Making new directory '%s' @%Xh", name, handle.File.start)
+        if DEBUG_FAT: logging.debug("Making new directory '%s' @%Xh", name, handle.File.start)
         handle.Entry.chDOSPerms = 0x10
         self.stream.write(handle.Entry.pack())
         handle.Dir = self
@@ -1226,23 +1213,23 @@ class Dirtable(object):
     def rmtree(self, name=None):
         "Remove a full directory tree"
         if name:
-            logging.debug("rmtree:opening %s", name)
+            if DEBUG_FAT: logging.debug("rmtree:opening %s", name)
             target = self.opendir(name)
         else:
             target = self
         if not target:
-            logging.debug("rmtree:target '%s' not found!", name)
+            if DEBUG_FAT: logging.debug("rmtree:target '%s' not found!", name)
             return 0
         for it in target.iterator():
             n = it.Name()
             if it.IsDir():
                 if n in ('.', '..'): continue
                 target.opendir(n).rmtree()
-            logging.debug("rmtree:erasing '%s'", n)
+            if DEBUG_FAT: logging.debug("rmtree:erasing '%s'", n)
             target.erase(n)
         del target
         if name:
-            logging.debug("rmtree:erasing '%s'", name)
+            if DEBUG_FAT: logging.debug("rmtree:erasing '%s'", name)
             self.erase(name)
         return 1
 
@@ -1262,7 +1249,7 @@ class Dirtable(object):
             s = self.stream.read(32)
             # if we're at table end...
             if not s or s[0] == 0:
-                #~ logging.debug("Found next Dirtable's free slot @%Xh", found)
+                if DEBUG_FAT: logging.debug("Found next Dirtable's free slot @%Xh", found)
                 self.stream.seek(told)
                 self.lastfreeslot = found
                 return found
@@ -1320,7 +1307,7 @@ class Dirtable(object):
             it = self.opendir(e.Name()).iterator()
             it.next(); it.next()
             if next in it:
-                #~ logging.debug("Can't erase non empty directory slot @%d (pointing at #%d)", e._pos, e.Start())
+                if DEBUG_FAT: logging.debug("Can't erase non empty directory slot @%d (pointing at #%d)", e._pos, e.Start())
                 return 0
         start = e.Start()
         e.Start(0)
@@ -1332,7 +1319,7 @@ class Dirtable(object):
         self.stream.write(e._buf)
         if start:
             self.fat.free(start)
-        #~ logging.debug("Erased slot '%s' @%Xh (pointing at #%d)", name, e._pos, start)
+        if DEBUG_FAT: logging.debug("Erased slot '%s' @%Xh (pointing at #%d)", name, e._pos, start)
         return 1
 
     def rename(self, name, newname):
@@ -1342,15 +1329,15 @@ class Dirtable(object):
         else:
             e = self.find(name)
             if not e:
-                logging.debug("Can't find file to rename: '%'s", name)
+                if DEBUG_FAT: logging.debug("Can't find file to rename: '%'s", name)
                 return 0
         if self.find(newname):
-            logging.debug("Can't rename, file exists: '%s'", newname)
+            if DEBUG_FAT: logging.debug("Can't rename, file exists: '%s'", newname)
             return 0
         # Alloc new slot
         ne = self._alloc(newname)
         if not ne:
-            logging.debug("Can't alloc new file slot for '%s'", newname)
+            if DEBUG_FAT: logging.debug("Can't alloc new file slot for '%s'", newname)
             return 0
         # Copy attributes from old to new slot
         ne.Entry._buf[-21:] = e._buf[-21:]
@@ -1358,7 +1345,7 @@ class Dirtable(object):
         self.stream.seek(ne.Entry._pos)
         self.stream.write(ne.Entry._buf)
         ne.IsValid = False
-        logging.debug("'%s' renamed to '%s'", name, newname)
+        if DEBUG_FAT: logging.debug("'%s' renamed to '%s'", name, newname)
         self._update_dirtable(ne.Entry)
         self._update_dirtable(e, True)
         # Mark the old one as erased
@@ -1375,11 +1362,11 @@ class Dirtable(object):
         if report_only:
             return (size-pos)/self.boot.cluster
         if not (size-pos)/self.boot.cluster: # if free space is less than a cluster
-            logging.debug("Can't shrink directory table, free space < 1 cluster!")
+            if DEBUG_FAT: logging.debug("Can't shrink directory table, free space < 1 cluster!")
             return 0
         self.stream.seek(pos)
         self.stream.trunc()
-        logging.debug("Shrank directory table from %d to %d bytes freeing %d clusters", size, pos, rdiv(size-pos, self.boot.cluster))
+        if DEBUG_FAT: logging.debug("Shrank directory table from %d to %d bytes freeing %d clusters", size, pos, rdiv(size-pos, self.boot.cluster))
         return 1
 
     def clean(self, report_only=False):
@@ -1400,7 +1387,7 @@ class Dirtable(object):
         self.lastfreeslot = self.stream.tell()
         unused = pos - self.stream.tell()
         self.stream.write(bytearray(unused)) # blank unused area
-        logging.debug("Cleaned directory table freeing %d slots", unused/32)
+        if DEBUG_FAT: logging.debug("Cleaned directory table freeing %d slots", unused/32)
 
     @staticmethod
     def _sortby(a, b):
@@ -1428,7 +1415,7 @@ class Dirtable(object):
         self.lastfreeslot = self.stream.tell()
         unused = pos - self.stream.tell()
         self.stream.write(bytearray(unused)) # blank unused area
-        logging.debug("Sorted directory table freeing %d slots", unused/32)
+        if DEBUG_FAT: logging.debug("Sorted directory table freeing %d slots", unused/32)
 
     def list(self, bare=False):
         "Simple directory listing, with size and last modification time"
@@ -1518,7 +1505,7 @@ def fat_copy_clusters(boot, fat, start):
     src = Chain(boot, fat, start, boot.cluster*count)
     target = fat.alloc(count) # possibly defragmented
     dst = Chain(boot, fat, target, boot.cluster*count)
-    logging.debug("Copying %s to %s", src, dst)
+    if DEBUG_FAT: logging.debug("Copying %s to %s", src, dst)
     s = 1
     while s:
         s = src.read(boot.cluster)
