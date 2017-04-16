@@ -4,27 +4,6 @@
 
 DEBUG_EXFAT=0
 
-""" BUGS/TODO:
-- implement frags, clean & co.
-- merge exFAT w/ FAT Chain (write)
-- implement set/clear Label (FAT too)
-BITMAP:
-- Bitmap findfree alternative?
-- findfree with tuple (start, run) for free clusters account?
-- set ranges of bits/fat slots at once!
-- read bitmap 128 bit at once and use math to find set/clear bits?
-- write set bit runs multiple bytes at once?
-- bitmap is FATted, so it's more slower: dict{pos:QWORD}?
-- defer Bitmap file update (allocation is really showed already by slot or FAT)?
-OTHER:
-- fix setting last alloced cluster (is lower than reqd?)
-- parameters {} to tune cluster allocator?
-- generalize pack() in utils.py
-
-Advantages of common_getattr & pack technique in respect of property():
-- defer unpacking at effective access time
-- unpack *once* only what needed
-- pack *once* the full buffer"""
 import copy, os, struct, time, cStringIO, atexit
 from datetime import datetime
 import logging

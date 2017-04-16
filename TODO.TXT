@@ -1,0 +1,53 @@
+Advantages of common_getattr & pack technique in respect of property():
+- defer unpacking at effective access time
+- unpack *once* only what needed
+- pack *once* the full buffer
+
+BUGS/TODO: (disk.py)
+optimize SetFilePointer speed due to 64-bit upgrading?
+
+
+
+BUGS/TODO: (FAT.py)
+- check 255 chars limit in nested directories (investigate in exFAT too)
+- raise/manage an exception if no more allocatable clusters? free partly allocated ones? or return them?
+- date/time preservation in fat_copy_tree_extract (exFAT too)
+- merge create in open with modes? (exFAT too)
+- stat in dirtable? (exFAT too)
+- open w/ full path like opendir? (exFAT too)
+- must invalidate handle to erased/replaced objects not explicitly closed!
+- unique handle to directories (to auto-update on closing)?
+- pack & co.: update str += str with list join
+- 65,534 bytes limit for a folder?
+- use FAT32 FSInfo
+- parameters {} to tune cluster allocator?
+- guard against seek beyond last valid offset (specially in FixedRoot)
+- generalize pack() in utils.py
+
+
+
+BUGS/TODO: (exFAT.py)
+- implement frags, clean & co.
+- mkdirs?
+- merge exFAT w/ FAT Chain (write) // 31.8.16 bug in FAT alloc prevented this?
+- implement set/clear Label (FAT too)
+BITMAP:
+- Bitmap findfree alternative?
+- findfree with tuple (start, run) for free clusters account?
+- set ranges of bits/fat slots at once!
+- read bitmap 128 bit at once and use math to find set/clear bits?
+- write set bit runs multiple bytes at once?
+- bitmap is FATted, so it's slower: dict{pos:QWORD}?
+- defer Bitmap file update (allocation is really showed already by slot or FAT)?
+OTHER:
+- test 256M limit per directory table?
+- fix setting last allocated cluster (is lower than reqd?)
+- parameters {} to tune cluster allocator?
+- generalize pack() in utils.py
+
+
+
+BUGS/TODO: (Reorder.pyw)
+exclude . and .. from subdirs
+use U D T button and eventually other accelerators?
+double-click/enter on dir item scans it
