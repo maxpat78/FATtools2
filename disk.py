@@ -45,16 +45,20 @@ class win32_disk(object):
 		logging.debug("Successfully opened HANDLE to Win32 Disk %s (size %d MB) for exclusive access", name, self.size/(1<<20))
 
 	def seek(self, offset, whence=0):
-		if offset != windll.kernel32.SetFilePointer(self.handle, offset, 0, whence):
-			print "seek failed with error", windll.kernel32.GetLastError()
-			sys.exit(1)
+		n = c_int(offset>>32)
+		if 0xFFFFFFFF == windll.kernel32.SetFilePointer(self.handle, offset&0xFFFFFFFF, byref(n), whence):
+			if windll.kernel32.GetLastError() != 0:
+				print "seek failed with error", windll.kernel32.GetLastError()
+				sys.exit(1)
 
 	def tell(self):
-		offset = windll.kernel32.SetFilePointer(self.handle, 0, 0, 1)
-		if windll.kernel32.GetLastError():
-			print "tell failed with error", windll.kernel32.GetLastError()
-			sys.exit(1)
-		return offset
+		n = c_int(0)
+		offset = windll.kernel32.SetFilePointer(self.handle, 0, byref(n), 1)
+		if offset == 0xFFFFFFFF:
+			if windll.kernel32.GetLastError() != 0:
+				print "seek failed with error", windll.kernel32.GetLastError()
+				sys.exit(1)
+		return (n.value<<32) & offset
 
 	def readinto(self, buf):
 		assert len(buf) > 0
