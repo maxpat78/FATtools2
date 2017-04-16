@@ -1,9 +1,15 @@
-""" Reorder.pyw
+""" Reorder.pyw     V. 0.03
 
 Visually alters a FAT/FAT32 directory table order. 
 
 Very useful with micro Hi-Fi supporting USB keys but low of memory and bad
-in browsing. """
+in browsing.
+
+TODO
+====
+use U D T button and eventually other accelerators
+double-click/enter on dir item scans it
+"""
 
 import sys, os
 
@@ -20,6 +26,7 @@ from FAT import *
 class Manipulator(Tk):
     def __init__ (p):
         Tk.__init__(p)
+        p.disk = ''
         p.title("Reorder a FAT/FAT32 directory table")
         p.geometry('640x500')
         frame = Frame(p, width=640, height=500)
@@ -75,9 +82,11 @@ class Manipulator(Tk):
     def scan(p):
         p.list.delete(0, END)
         drive, folder = os.path.split(p.tbox.get())
-        # Mmmmm... what behavior when the same disk is opened multiple times?
+        drive = drive[:2] # strip dash
         try:
-            p.root = opendisk(drive, 'r+b')
+            if not p.disk:
+                p.disk = opendisk(drive, 'r+b')
+            p.root = p.disk
             if folder:
                 p.root = p.root.opendir(folder)
         except:
