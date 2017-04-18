@@ -301,7 +301,7 @@ def exfat_mkfs(stream, size, sector=512, params={}):
         if (fsinfo['required_size'] / (1<<k)) < 1024: break
 
     free_clusters = boot.dwDataRegionLength - rdiv(bitmap.u64DataLength, boot.cluster) - rdiv(upcase.u64DataLength, boot.cluster) - 1
-    print "Successfully applied exFAT to a %d %s volume.\n%d clusters of %.1f KB.\n%d %s free in %d clusters." % (fsinfo['required_size']/(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/(1<<k), sizes[k], free_clusters)
+    print "Successfully applied exFAT to a %.02f %s volume.\n%d clusters of %.1f KB.\n%.02f %s free in %d clusters." % (fsinfo['required_size']/float(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/float(1<<k), sizes[k], free_clusters)
     print "\nFAT Region @0x%X, Data Region @0x%X, Root (cluster #%d) @0x%X" % (boot.fatoffs, boot.cl2offset(2), boot.dwRootCluster, boot.cl2offset(boot.dwRootCluster))
 
     return 0

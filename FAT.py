@@ -7,7 +7,7 @@ import logging
 
 import disk, utils
 
-DEBUG_FAT=1
+DEBUG_FAT=0
 
 class boot_fat32(object):
     "FAT32 Boot Sector"

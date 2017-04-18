@@ -187,7 +187,7 @@ def fat12_mkfs(stream, size, sector=512, params={}):
         if (fsinfo['required_size'] / (1<<k)) < 1024: break
 
     free_clusters = fsinfo['clusters'] # root is outside clusters heap
-    print "Successfully applied FAT12 to a %d %s volume.\n%d clusters of %.1f KB.\n%d %s free in %d clusters." % (fsinfo['required_size']/(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/(1<<k), sizes[k], free_clusters)
+    print "Successfully applied FAT12 to a %.02f %s volume.\n%d clusters of %.1f KB.\n%.02f %s free in %d clusters." % (fsinfo['required_size']/float(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/float(1<<k), sizes[k], free_clusters)
     print "\nFAT #1 @0x%X, Data Region @0x%X, Root @0x%X" % (boot.fatoffs, boot.cl2offset(2), boot.root())
 
     return 0
@@ -337,7 +337,7 @@ def fat16_mkfs(stream, size, sector=512, params={}):
         if (fsinfo['required_size'] / (1<<k)) < 1024: break
 
     free_clusters = fsinfo['clusters'] # root is outside clusters heap
-    print "Successfully applied FAT16 to a %d %s volume.\n%d clusters of %.1f KB.\n%d %s free in %d clusters." % (fsinfo['required_size']/(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/(1<<k), sizes[k], free_clusters)
+    print "Successfully applied FAT16 to a %.02f %s volume.\n%d clusters of %.1f KB.\n%.02f %s free in %d clusters." % (fsinfo['required_size']/float(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/float(1<<k), sizes[k], free_clusters)
     print "\nFAT #1 @0x%X, Data Region @0x%X, Root @0x%X" % (boot.fatoffs, boot.cl2offset(2), boot.root())
 
     return 0
@@ -503,7 +503,7 @@ def fat32_mkfs(stream, size, sector=512, params={}):
         if (fsinfo['required_size'] / (1<<k)) < 1024: break
 
     free_clusters = fsinfo['clusters'] - 1
-    print "Successfully applied FAT32 to a %d %s volume.\n%d clusters of %.1f KB.\n%d %s free in %d clusters." % (fsinfo['required_size']/(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/(1<<k), sizes[k], free_clusters)
+    print "Successfully applied FAT32 to a %.02f %s volume.\n%d clusters of %.1f KB.\n%.02f %s free in %d clusters." % (fsinfo['required_size']/float(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/float(1<<k), sizes[k], free_clusters)
     print "\nFAT #1 @0x%X, Data Region @0x%X, Root (cluster #%d) @0x%X" % (boot.fatoffs, boot.cl2offset(2), 2, boot.cl2offset(2))
 
     return 0
