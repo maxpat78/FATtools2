@@ -4,6 +4,8 @@ import logging
 from ctypes import *
 #~ import hexdump
 
+DEBUG_DISK = 0
+
 class win32_disk(object):
 	"Handles a Win32 disk"
 	open_handles = {}
@@ -42,7 +44,7 @@ class win32_disk(object):
 		self.name = name
 		self.mode = mode
 		self.buf = create_string_buffer(4096)
-		logging.debug("Successfully opened HANDLE to Win32 Disk %s (size %d MB) for exclusive access", name, self.size/(1<<20))
+		if DEBUG_DISK: logging.debug("Successfully opened HANDLE to Win32 Disk %s (size %d MB) for exclusive access", name, self.size/(1<<20))
 
 	def seek(self, offset, whence=0):
 		n = c_int(offset>>32)
@@ -143,15 +145,15 @@ class disk(object):
 			self.pos = offset
 		self.si = self.pos / self.blocksize
 		self.so = self.pos % self.blocksize
-		#~ logging.debug("disk pointer to set @%Xh", self.si*self.blocksize)
+		if DEBUG_DISK: logging.debug("disk pointer to set @%Xh", self.si*self.blocksize)
 		self._file.seek(self.si*self.blocksize)
-		#~ logging.debug("si=%Xh lastsi=%Xh so=%Xh", self.si,self.lastsi,self.so)
+		if DEBUG_DISK: logging.debug("si=%Xh lastsi=%Xh so=%Xh", self.si,self.lastsi,self.so)
 
 	def tell(self):
 		return self.pos
 
 	def cache_stats(self):
-		logging.debug("Cache items/hits/misses: %d/%d/%d", len(self.cache_table), self.cache_hits, self.cache_misses)
+		if DEBUG_DISK: logging.debug("Cache items/hits/misses: %d/%d/%d", len(self.cache_table), self.cache_hits, self.cache_misses)
 
 	def cache_flush(self, sector=None):
 		if not self.cache_dirties:
@@ -161,15 +163,15 @@ class disk(object):
 			i = self.cache_table[sector]
 			self._file.write(self.cache[i:i+self.blocksize])
 			del self.cache_dirties[sector]
-			#~ logging.debug("%s: flushed sector #%d from cache[%d]", self, sector,i/512)
+			if DEBUG_DISK: logging.debug("%s: flushed sector #%d from cache[%d]", self, sector,i/512)
 			return
-		#~ logging.debug("%s: flushing %d dirty sectors from cache", self, len(self.cache_dirties))
+		if DEBUG_DISK: logging.debug("%s: flushing %d dirty sectors from cache", self, len(self.cache_dirties))
 		# Should writes be ordered and merged if possible?
 		for sec in self.cache_dirties:
 			self._file.seek(sec*self.blocksize)
 			i = self.cache_table[sec]
 			self._file.write(self.cache[i:i+self.blocksize])
-		#~ logging.debug("Cache items/hits/misses: %d/%d/%d", len(self.cache_table), self.cache_hits, self.cache_misses)
+		if DEBUG_DISK: logging.debug("Cache items/hits/misses: %d/%d/%d", len(self.cache_table), self.cache_hits, self.cache_misses)
 		self.cache_dirties = {}
 		self.cache_table = {}
 		self.cache_tableR = {}
@@ -180,26 +182,26 @@ class disk(object):
 		if self.asize ==self.blocksize:
 			if self.si not in self.cache_table:
 				self.cache_misses += 1
-				#~ logging.debug("%s: cache_retrieve missed %d", self, self.si)
+				if DEBUG_DISK: logging.debug("%s: cache_retrieve missed %d", self, self.si)
 				return False
 			self.cache_hits += 1
 			i = self.cache_table[self.si]
 			self.buf = self.cache[i:i+self.asize]
-			#~ logging.debug("%s: cache_retrieve hit %d", self, self.si)
+			if DEBUG_DISK: logging.debug("%s: cache_retrieve hit %d", self, self.si)
 			return True
 
 		# If we are retrieving multiple blocks...
 		for i in range(self.asize/self.blocksize):
 			# If one block is not cached...
 			if self.si+i not in self.cache_table:
-				#~ logging.debug("%s: cache_retrieve (multisector) miss-not cached %d", self, self.si+i)
+				if DEBUG_DISK: logging.debug("%s: cache_retrieve (multisector) miss-not cached %d", self, self.si+i)
 				self.cache_misses += 1
 				continue
 			# If one block is dirty, first flush it...
 			if self.si+i in self.cache_dirties:
-				#~ logging.debug("%s: cache_retrieve (multisector) flush %d", self, self.si+i)
+				if DEBUG_DISK: logging.debug("%s: cache_retrieve (multisector) flush %d", self, self.si+i)
 				self.cache_flush(self.si+i)
-				#~ logging.debug("%s: seeking back @%Xh after flush", self, self.pos)
+				if DEBUG_DISK: logging.debug("%s: seeking back @%Xh after flush", self, self.pos)
 				self.seek(self.pos)
 				continue
 		return False # consider a miss
@@ -213,7 +215,7 @@ class disk(object):
 			self.seek(self.pos)
 		pos = self.cache_index
 		#~ logging.debug("loading disk sector #%d into cache[%d] from offset %Xh", self.si, pos/512, self._file.tell())
-		#~ logging.debug("loading disk sector #%d into cache[%d]", self.si, pos/512)
+		if DEBUG_DISK: logging.debug("loading disk sector #%d into cache[%d]", self.si, pos/512)
 		self._file.readinto(self.cache[pos:pos+self.asize])
 		self.buf = self.cache[pos:pos+self.asize]
 		#~ if self.si == 50900:
@@ -232,7 +234,7 @@ class disk(object):
 		return pos
 
 	def read(self, size=-1):
-		#~ logging.debug("read(%d) bytes @%Xh", size, self.pos)
+		if DEBUG_DISK: logging.debug("read(%d) bytes @%Xh", size, self.pos)
 		self.seek(self.pos)
 		# If size is negative
 		if size < 0:
@@ -247,7 +249,7 @@ class disk(object):
 		self.asize = (se - self.si) * self.blocksize # full sectors to read in
 		# If sectors are already cached...
 		if self.cache_retrieve():
-			#~ logging.debug("%d bytes read from cache", self.asize)
+			if DEBUG_DISK: logging.debug("%d bytes read from cache", self.asize)
 			self.lastsi = self.si
 			self.pos += size
 			return self.buf[self.so : self.so+size]
@@ -256,7 +258,7 @@ class disk(object):
 		if self.asize > self.blocksize:
 			self.buf = bytearray(self.asize)
 			self._file.seek(self.si*self.blocksize)
-			#~ logging.debug("reading %d bytes directly from disk @%Xh", self.asize, self._file.tell())
+			if DEBUG_DISK: logging.debug("reading %d bytes directly from disk @%Xh", self.asize, self._file.tell())
 			self._file.readinto(self.buf)
 			# Direct read (bypass) DON'T advance lastsi? Or file pointer?
 			self.si += self.asize/self.blocksize # 11.01.2016: fix mkexfat flaw
@@ -270,45 +272,45 @@ class disk(object):
 		return self.buf[self.so : self.so+size]
 
 	def write(self, s): # s MUST be of type bytearray/memoryview
-		#~ logging.debug("request to write %d bytes @%Xh", len(s), self.pos)
+		if DEBUG_DISK: logging.debug("request to write %d bytes @%Xh", len(s), self.pos)
 		if len(s) == 0: return
 		# If we have to complete a sector...
 		if self.so:
 			j = min(self.blocksize - self.so, len(s))
-			#~ logging.debug("writing middle sector %d[%d:%d]", self.si, self.so, self.so+j)
+			if DEBUG_DISK: logging.debug("writing middle sector %d[%d:%d]", self.si, self.so, self.so+j)
 			self.asize = 512
 			if not self.cache_retrieve():
 				self.cache_readinto()
 			# We assume buf is pointing to rawcache
 			self.buf[self.so : self.so+j] = s[:j]
 			s = s[j:] # slicing penalty if buffer?
-			#~ logging.debug("len(s) is now %d", len(s))
+			if DEBUG_DISK: logging.debug("len(s) is now %d", len(s))
 			self.cache_dirties[self.si] = True
 			self.pos += j
 			self.seek(self.pos)
 		# if we have full sectors to write...
 		if len(s) > self.blocksize:
 			full_blocks = len(s)/512
-			#~ logging.debug("writing %d sector(s) directly to disk", full_blocks)
+			if DEBUG_DISK: logging.debug("writing %d sector(s) directly to disk", full_blocks)
 			# Directly write full sectors to disk
 			#~ self._file.seek(self.si*self.blocksize)
 			# Invalidate eventually cached data
 			for si in xrange(self.si, self.si+full_blocks):
 				if si in self.cache_table:
-					#~ logging.debug("removing sector #%d from cache", si)
+					if DEBUG_DISK: logging.debug("removing sector #%d from cache", si)
 					Ri = self.cache_table[si]
 					del self.cache_tableR[Ri]
 					del self.cache_table[si]
 					if si in self.cache_dirties:
-						#~ logging.debug("removing sector #%d from dirty sectors", si)
+						if DEBUG_DISK: logging.debug("removing sector #%d from dirty sectors", si)
 						del self.cache_dirties[si]
 			self._file.write(s[:full_blocks*512])
 			self.pos += full_blocks*512
 			self.seek(self.pos)
 			s = s[full_blocks*512:] # slicing penalty if buffer?
-			#~ logging.debug("len(s) is now %d", len(s))
+			if DEBUG_DISK: logging.debug("len(s) is now %d", len(s))
 		if len(s):
-			#~ logging.debug("writing sector %d[%d:%d] from start", self.si, self.so, self.so+len(s))
+			if DEBUG_DISK: logging.debug("writing sector %d[%d:%d] from start", self.si, self.so, self.so+len(s))
 			self.asize = 512
 			if not self.cache_retrieve():
 				self.cache_readinto()
