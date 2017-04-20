@@ -63,9 +63,16 @@ if __name__ == '__main__':
     "Randomly populates and erases a tree of random files and directories (for test purposes)"
     #~ DEBUG_EXFAT=1
     root = opendisk('G:', 'r+b')
-
+    #~ root = opendisk('G.ima', 'r+b')
+    
+    free_clusters, free_bytes = root.getdiskspace()
+    threshold = root.boot.clusters() * root.boot.wBytesPerSector * root.boot.uchSectorsPerCluster / 100
+    
+    print "Starting: %d bytes in %d cluster(s) free" % (free_bytes, free_clusters)
+    
     TOTDIRS, TOTFILES, TOTBYTES = 0, 0, 0
-    for i in range(randint(3,16)):
+    #~ for i in range(randint(3,16)):
+    while free_bytes > threshold:
         BASE = 'DIRs/' # ROOT folder
         for nn in range(randint(2,9)):
             BASE += PwGenRand(randint(8,24), mix=3, case=1) + '/'
@@ -84,6 +91,7 @@ if __name__ == '__main__':
             fp.close()  # explicit close avoids corruption!
             TOTFILES += 1
             TOTBYTES += len(s)
+            free_bytes -= len(s)
             if i == 48:
              for i in range(16):
                  id = randint(0,len(gens)-1)
@@ -93,5 +101,5 @@ if __name__ == '__main__':
             id = randint(0,len(gens)-1)
             subdir.erase(gens[id])
             del gens[id]
-           
-    print 'Generated %d bytes in %d files in %d directories.' % (TOTBYTES, TOTFILES, TOTDIRS)
+        free_clusters, free_bytes = root.getdiskspace()
+        print "Running: %d bytes in %d cluster(s) free" % (free_bytes, free_clusters)
