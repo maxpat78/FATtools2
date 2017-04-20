@@ -1092,6 +1092,12 @@ class Dirtable(object):
         if startcluster not in Dirtable.dirtable:
             Dirtable.dirtable[startcluster] = {'LFNs':{}, 'Names':{}}
 
+    def getdiskspace(self):
+        "Return the disk free space in a tuple (clusters, bytes)"
+        free_clusters = self.fat.findmaxrun()[0]
+        free_bytes = free_clusters * self.boot.wBytesPerSector * self.boot.uchSectorsPerCluster
+        return (free_clusters, free_bytes)
+
     def open(self, name):
         "Open the chain corresponding to an existing file name"
         res = Handle()
