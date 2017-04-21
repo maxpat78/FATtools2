@@ -156,22 +156,34 @@ class disk(object):
 		if DEBUG_DISK: logging.debug("Cache items/hits/misses: %d/%d/%d", len(self.cache_table), self.cache_hits, self.cache_misses)
 
 	def cache_flush(self, sector=None):
+		self.cache_stats()
 		if not self.cache_dirties:
+			# 21.04.17: must ANYWAY reset (read-only) cache, or higher cached slots could get silently overwritten!
+			if DEBUG_DISK: logging.debug("resetting cache (no dirty sectors)")
+			self.cache_table = {}
+			self.cache_tableR = {}
 			return
 		if sector != None: # assume it is called by cache_retrieve only, with the right sector #
 			self._file.seek(sector*self.blocksize)
 			i = self.cache_table[sector]
 			self._file.write(self.cache[i:i+self.blocksize])
 			del self.cache_dirties[sector]
-			if DEBUG_DISK: logging.debug("%s: flushed sector #%d from cache[%d]", self, sector,i/512)
+			if DEBUG_DISK: logging.debug("%s: dirty sector #%d committed to disk from cache[%d]", self, sector,i/512)
 			return
-		if DEBUG_DISK: logging.debug("%s: flushing %d dirty sectors from cache", self, len(self.cache_dirties))
+		if DEBUG_DISK: logging.debug("%s: committing %d dirty sectors to disk", self, len(self.cache_dirties))
 		# Should writes be ordered and merged if possible?
 		for sec in self.cache_dirties:
 			self._file.seek(sec*self.blocksize)
-			i = self.cache_table[sec]
-			self._file.write(self.cache[i:i+self.blocksize])
-		if DEBUG_DISK: logging.debug("Cache items/hits/misses: %d/%d/%d", len(self.cache_table), self.cache_hits, self.cache_misses)
+			try:
+				i = self.cache_table[sec]
+				self._file.write(self.cache[i:i+self.blocksize])
+			except:
+				if DEBUG_DISK: logging.debug("ERROR! Sector %d in cache_dirties not in cache_table!", sec)
+				if sec in self.cache_tableR.values():
+					if DEBUG_DISK: logging.debug("(but sector %d is in cache_tableR)", sec)
+				else:
+					if DEBUG_DISK: logging.debug("(and sector %d is neither in cache_tableR)", sec)
+				continue
 		self.cache_dirties = {}
 		self.cache_table = {}
 		self.cache_tableR = {}
@@ -182,12 +194,12 @@ class disk(object):
 		if self.asize ==self.blocksize:
 			if self.si not in self.cache_table:
 				self.cache_misses += 1
-				if DEBUG_DISK: logging.debug("%s: cache_retrieve missed %d", self, self.si)
+				if DEBUG_DISK: logging.debug("%s: cache_retrieve missed #%d", self, self.si)
 				return False
 			self.cache_hits += 1
 			i = self.cache_table[self.si]
 			self.buf = self.cache[i:i+self.asize]
-			if DEBUG_DISK: logging.debug("%s: cache_retrieve hit %d", self, self.si)
+			if DEBUG_DISK: logging.debug("%s: cache_retrieve hit #%d", self, self.si)
 			return True
 
 		# If we are retrieving multiple blocks...

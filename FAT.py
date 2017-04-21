@@ -174,10 +174,8 @@ class boot_fat16(object):
         # Offset of the 1st FAT copy
         self.fatoffs = self.wSectorsCount * self.wBytesPerSector + self._pos
         # Number of clusters represented in this FAT
-        try:
-            self.fatsize = self.dwTotalLogicalSectors/self.uchSectorsPerCluster
-        except ZeroDivisionError: # raised in FSguess if exFAT
-            pass
+        # Here the DWORD field seems to be set only if WORD one is too small
+        self.fatsize = (self.dwTotalLogicalSectors or self.wTotalSectors)/self.uchSectorsPerCluster
         # Offset of the fixed root directory table (immediately after the FATs)
         self.rootoffs = self.fatoffs + self.uchFATCopies * self.wSectorsPerFAT * self.wBytesPerSector + self._pos
         # Data area offset (=cluster #2)
@@ -200,7 +198,7 @@ class boot_fat16(object):
     def clusters(self):
         "Return the number of clusters in the data area"
         # Total sectors minus sectors preceding the data area
-        return (self.dwTotalLogicalSectors - (self.dataoffs/self.wBytesPerSector)) / self.uchSectorsPerCluster
+        return ((self.dwTotalLogicalSectors or self.wTotalSectors) - (self.dataoffs/self.wBytesPerSector)) / self.uchSectorsPerCluster
 
     def cl2offset(self, cluster):
         "Return the real offset of a cluster"
@@ -701,6 +699,9 @@ class FixedRoot(object):
 
     def tell(self): return self.pos
 
+    def realtell(self):
+        return self.stream.tell()
+
     def seek(self, offset, whence=0):
         if whence == 1:
             pos = self.pos + offset
@@ -713,10 +714,11 @@ class FixedRoot(object):
             if DEBUG_FAT: logging.debug("Attempt to seek @%Xh past fixed root end @%Xh", pos, self.size)
             return
         self.pos = pos
+        if DEBUG_FAT: logging.debug("FixedRoot: seeking @%Xh (@%Xh)", pos, self.start+pos)
         self.stream.seek(self.start+pos)
 
     def read(self, size=-1):
-        if DEBUG_FAT: logging.debug("read(%d) called from offset %Xh", size, self.pos)
+        if DEBUG_FAT: logging.debug("FixedRoot: read(%d) called from offset %Xh", size, self.pos)
         self.seek(self.pos)
         # If negative size, adjust
         if size < 0:
@@ -731,6 +733,7 @@ class FixedRoot(object):
         return buf
 
     def write(self, s):
+        if DEBUG_FAT: logging.debug("FixedRoot: writing %d bytes at offset %Xh", len(s), self.pos)
         self.seek(self.pos)
         if self.pos + len(s) > self.size:
             return
@@ -1471,6 +1474,7 @@ def opendisk(path, mode='rb'):
     bs = d.read(512)
     d.seek(0)
     fstyp = utils.FSguess(boot_fat16(bs)) # warning: if we call this a second time on the same Win32 disk, handle is unique and seek set already!
+    if DEBUG_FAT: logging.debug("opendisk guessed FS type %s", fstyp)
     if fstyp in ('FAT12', 'FAT16'):
         boot = boot_fat16(bs, stream=d)
     elif fstyp == 'FAT32':
@@ -1485,6 +1489,8 @@ def opendisk(path, mode='rb'):
         sys.exit(1)
 
     fat = FAT(d, boot.fatoffs, boot.clusters(), bitsize={'FAT12':12,'FAT16':16,'FAT32':32,'EXFAT':32}[fstyp], exfat=(fstyp=='EXFAT'))
+    if DEBUG_FAT: logging.debug("Inited BOOT object: %s", boot)
+    if DEBUG_FAT: logging.debug("Inited FAT object: %s", fat)
 
     return Dirtable(boot, fat, boot.dwRootCluster)
 
