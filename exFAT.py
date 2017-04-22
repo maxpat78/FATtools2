@@ -10,7 +10,7 @@ import logging
 if DEBUG_EXFAT: import hexdump
 
 import disk, utils
-from FAT import boot_fat16, boot_fat32, FAT
+from FAT import boot_fat16, FAT
 
 
 class boot_exfat(object):
@@ -919,8 +919,8 @@ class Dirtable(object):
     dirtable = {} # {cluster: {'Names':{}, 'Handle':Handle}}
 
     def __init__(self, boot, fat, startcluster=0, size=0, nofat=0, path='.'):
-        if type(boot) == type(HandleType):
-            self.handle = boot
+        if type(boot) == HandleType:
+            self.handle = boot # It's a directory handle
             self.boot = self.handle.File.boot
             self.fat = self.handle.File.fat
             self.start = self.handle.File.start
@@ -937,6 +937,12 @@ class Dirtable(object):
             # Names maps lowercased names and Direntry slots
             # Handle contains the unique Handle to the directory table
             Dirtable.dirtable[self.start] = {'Names':{}, 'Handle':None}
+
+    def getdiskspace(self):
+        "Return the disk free space in a tuple (clusters, bytes)"
+        free_clusters = self.boot.bitmap.findmaxrun()[0]
+        free_bytes = free_clusters * self.boot.cluster
+        return (free_clusters, free_bytes)
 
     def open(self, name):
         "Open the slot corresponding to an existing file name"
@@ -1345,20 +1351,18 @@ def opendisk(path, mode='rb'):
     bs = d.read(512)
     d.seek(0)
     fstyp = utils.FSguess(boot_fat16(bs)) # warning: if we call this a second time on the same Win32 disk, handle is unique and seek set already!
-    if fstyp in ('FAT12', 'FAT16'):
-        boot = boot_fat16(bs, stream=d)
-    elif fstyp == 'FAT32':
-        boot = boot_fat32(bs, stream=d)
-    elif fstyp == 'EXFAT':
+    if DEBUG_EXFAT: logging.debug("opendisk guessed FS type %s", fstyp)
+    if fstyp == 'EXFAT':
         boot = boot_exfat(bs, stream=d)
-    elif fstyp == 'NTFS':
-        print fstyp, "file system not supported. Aborted."
-        sys.exit(1)
     else:
         print "File system not recognized. Aborted."
         sys.exit(1)
 
     fat = FAT(d, boot.fatoffs, boot.clusters(), bitsize={'FAT12':12,'FAT16':16,'FAT32':32,'EXFAT':32}[fstyp], exfat=(fstyp=='EXFAT'))
+
+    if DEBUG_EXFAT: logging.debug("Inited BOOT object: %s", boot)
+    if DEBUG_EXFAT: logging.debug("Inited FAT object: %s", fat)
+
     root = Dirtable(boot, fat, boot.dwRootCluster)
     for e in root.iterator():
         if e.type == 1: # Find & open Bitmap
