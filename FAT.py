@@ -65,6 +65,10 @@ class boot_fat32(object):
         self.dataoffs = self.fatoffs + self.uchFATCopies * self.dwSectorsPerFAT * self.wBytesPerSector + self._pos
         # Number of clusters represented in this FAT (if valid buffer)
         self.fatsize = self.dwTotalLogicalSectors/self.uchSectorsPerCluster
+        if self.stream:
+            self.fsinfo = fat32_fsinfo(stream=self.stream, offset=self.wFSISector*self.cluster)
+        else:
+            self.fsinfo = None
 
     __getattr__ = utils.common_getattr
 
@@ -251,6 +255,7 @@ class FAT(object):
         self.real_last = min(self.reserved-1, self.size+2-1)
         self.decoded = {} # {cluster index: cluster content}
         self.last_free_alloc = 2 # last free cluster allocated
+        self.free_clusters = None # optionally track free clusters
 
     def __str__ (self):
         return "%d-bit %sFAT table of %d clusters starting @%Xh\n" % (self.bits, ('','ex')[self.exfat], self.size, self.offset)
@@ -402,7 +407,8 @@ class FAT(object):
             maxrun = max(t, maxrun, key=lambda x:x[1])
             n += t[1]
             t = (t[0]+t[1], t[1])
-        if DEBUG_FAT: logging.debug("Found the biggest run of %d clusters from #%d on %d total clusters", maxrun[1], maxrun[0], n)
+        if DEBUG_FAT: logging.debug("Found the biggest run of %d clusters from #%d on %d total free clusters", maxrun[1], maxrun[0], n)
+        self.free_clusters = n
         return n, maxrun
 
     # TODO: split very large runs
@@ -432,6 +438,13 @@ class FAT(object):
         """Allocate a chain of free clusters and appropriately mark the FATs.
         Returns the first cluster or zero in case of failure"""
         if DEBUG_FAT: logging.debug("request to allocate %d clusters from #%Xh(%d), search from #%Xh", count, start, start, self.last_free_alloc)
+ 
+        if self.free_clusters != None:
+            if self.free_clusters < count:
+                if DEBUG_FAT: logging.debug("can't allocate clusters, there are only %d free", self.free_clusters)
+                return 0
+            if DEBUG_FAT: logging.debug("ok to search, %d clusters free", self.free_clusters)
+            self.free_clusters -= count
 
         last = start
 
@@ -474,14 +487,19 @@ class FAT(object):
 
     def free(self, start):
         "Free a clusters chain"
+        freed_clusters = 0
         if DEBUG_FAT: logging.debug("freeing cluster chain from %Xh", start)
         while not (self.last <= self[start] <= self.last+7): # islast
             prev = start
             start = self[start]
             self[prev] = 0
+            freed_clusters += 1
             if DEBUG_FAT: logging.debug("freed cluster %x", prev)
         self[start] = 0
-        if DEBUG_FAT: logging.debug("freed last cluster %Xh", start)
+        freed_clusters += 1
+        if DEBUG_FAT: logging.debug("freed %d clusters total, last %Xh", freed_clusters, start)
+        if self.free_clusters != None:
+            self.free_clusters += freed_clusters
 
 
 class Chain(object):
@@ -1097,8 +1115,11 @@ class Dirtable(object):
 
     def getdiskspace(self):
         "Return the disk free space in a tuple (clusters, bytes)"
-        free_clusters = self.fat.findmaxrun()[0]
-        free_bytes = free_clusters * self.boot.wBytesPerSector * self.boot.uchSectorsPerCluster
+        if self.fat.free_clusters != None:
+            free_clusters = self.fat.free_clusters
+        else:
+            free_clusters = self.fat.findmaxrun()[0]
+        free_bytes = free_clusters * self.boot.cluster
         return (free_clusters, free_bytes)
 
     def open(self, name):
@@ -1489,6 +1510,7 @@ def opendisk(path, mode='rb'):
         sys.exit(1)
 
     fat = FAT(d, boot.fatoffs, boot.clusters(), bitsize={'FAT12':12,'FAT16':16,'FAT32':32,'EXFAT':32}[fstyp], exfat=(fstyp=='EXFAT'))
+
     if DEBUG_FAT: logging.debug("Inited BOOT object: %s", boot)
     if DEBUG_FAT: logging.debug("Inited FAT object: %s", fat)
 
