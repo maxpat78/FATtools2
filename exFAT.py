@@ -323,7 +323,7 @@ class Chain(object):
         if self.nofat:
             # Simply mark the free clusters
             self.boot.bitmap.set(st, nf, True)
-            if self.boot.bitmap.free_clusters:
+            if self.boot.bitmap.free_clusters != None:
                 self.boot.bitmap.free_clusters += nf
         else:
             # Free the chain from next to last
@@ -1201,7 +1201,7 @@ class Dirtable(object):
                 # Free Bitmap only
                 if DEBUG_EXFAT: logging.debug("Erasing contig run of %d clusters from %Xh", rdiv(e.u64ValidDataLength, self.boot.cluster), start)
                 self.boot.bitmap.set(start, rdiv(e.u64ValidDataLength, self.boot.cluster), True)
-                if self.boot.bitmap.free_clusters:
+                if self.boot.bitmap.free_clusters != None:
                     self.boot.bitmap.free_clusters += rdiv(e.u64ValidDataLength, self.boot.cluster)
             else:
                 # Free FAT & Bitmap
