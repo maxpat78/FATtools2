@@ -323,6 +323,8 @@ class Chain(object):
         if self.nofat:
             # Simply mark the free clusters
             self.boot.bitmap.set(st, nf, True)
+            if self.boot.bitmap.free_clusters:
+                self.boot.bitmap.free_clusters += nf
         else:
             # Free the chain from next to last
             self.boot.bitmap.free(self.fat[st])
@@ -366,6 +368,7 @@ class Bitmap(Chain):
         self.vco = -1
         self.lastvlcn = (0, cluster) # last cluster VCN & LCN
         self.last_free_alloc = 2
+        self.free_clusters = None # optionally track free clusters
         self.runs = {} # {pos: QWORD}
         # Bitmap always uses FAT, even if contig, but is fixed size
         self.nofat = self.size == self.maxrun4len(self.size)
@@ -470,7 +473,7 @@ class Bitmap(Chain):
             if start > self.fat.real_last:
                 return -1, -1 # is this right if we reach last valid cluster?
             if not self.isset(start):
-                while not self.isset(start) and start <= self.fat.real_last:
+                while start <= self.fat.real_last and not self.isset(start):
                     if i < 0: i = start
                     start += 1
                     n += 1
@@ -494,6 +497,7 @@ class Bitmap(Chain):
             if count and maxrun[1] >= count: break # break if we found the required run
             t = (t[0]+t[1], t[1])
         if DEBUG_EXFAT: logging.debug("Found the biggest run of %d clusters from #%d on %d total clusters", maxrun[1], maxrun[0], n)
+        self.free_clusters = n
         return n, maxrun
 
     def alloc(self, count, start=2, first=0, nofat=False):
@@ -508,6 +512,13 @@ class Bitmap(Chain):
         preceding ones. Typically, alloc(n) is called the first time for a new file, then
         alloc(n, x, y) to expand it."""
         if DEBUG_EXFAT: logging.debug("alloc: requested %d cluster(s) from 0x%X", count, start)
+
+        if self.free_clusters != None:
+            if self.free_clusters < count:
+                if DEBUG_EXFAT: logging.debug("can't allocate clusters, there are only %d free", self.free_clusters)
+                return 0
+            if DEBUG_EXFAT: logging.debug("ok to search, %d clusters free", self.free_clusters)
+            self.free_clusters -= count
 
         last = start
         is_contiguous = False # tell if the full set of clusters, previously and actually allocates, is not fragmented
@@ -572,14 +583,19 @@ class Bitmap(Chain):
     def free(self, start):
         "Free the Bitmap following a clusters chain"
         if DEBUG_EXFAT: logging.debug("freeing cluster chain from %Xh", start)
+        freed_clusters = 0
         while not (self.fat.last <= self.fat[start] <= self.fat.last+7): # islast
             prev = start
             start = self.fat[start]
             #~ self.fat[prev] = 0 # FAT itself can remain dirty?
             self.set(prev, clear=True)
+            freed_clusters += 1
             if DEBUG_EXFAT: logging.debug("freed cluster %x", prev)
         #~ self.fat[start] = 0
         self.set(start, clear=True)
+        freed_clusters += 1
+        if self.free_clusters != None:
+            self.free_clusters += freed_clusters
         if DEBUG_EXFAT: logging.debug("freed last cluster %Xh", start)
 
 
@@ -1185,6 +1201,8 @@ class Dirtable(object):
                 # Free Bitmap only
                 if DEBUG_EXFAT: logging.debug("Erasing contig run of %d clusters from %Xh", rdiv(e.u64ValidDataLength, self.boot.cluster), start)
                 self.boot.bitmap.set(start, rdiv(e.u64ValidDataLength, self.boot.cluster), True)
+                if self.boot.bitmap.free_clusters:
+                    self.boot.bitmap.free_clusters += rdiv(e.u64ValidDataLength, self.boot.cluster)
             else:
                 # Free FAT & Bitmap
                 if DEBUG_EXFAT: logging.debug("Fragmented contents, freeing FAT chain from %Xh", start)
