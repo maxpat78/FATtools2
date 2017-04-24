@@ -956,7 +956,10 @@ class Dirtable(object):
 
     def getdiskspace(self):
         "Return the disk free space in a tuple (clusters, bytes)"
-        free_clusters = self.boot.bitmap.findmaxrun()[0]
+        if self.boot.bitmap.free_clusters != None:
+            free_clusters = self.boot.bitmap.free_clusters
+        else:
+            free_clusters = self.boot.bitmap.findmaxrun()[0]
         free_bytes = free_clusters * self.boot.cluster
         return (free_clusters, free_bytes)
 
