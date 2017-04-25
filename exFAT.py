@@ -425,8 +425,8 @@ class Bitmap(Chain):
             self.seek(-1, 1)
             self.write(chr(B))
             if DEBUG_EXFAT: logging.debug("set B=0x%X", B)
-
-    def findfree_new(self, start=2, count=0):
+    
+    def findfree1(self, start=2, count=0):
         """Return index and length of the first free clusters run beginning from
         'start' or (-1,0) in case of failure. If 'count' is given, limit the search
         to that amount."""
@@ -446,7 +446,7 @@ class Bitmap(Chain):
                 bytepos = (start-2)/8
             is_set = B & (1 << (bitpos%8))
             if not is_set:
-                while not is_set and start <= self.fat.real_last:
+                while start <= self.fat.real_last and not is_set:
                     if i < 0: i = start
                     start += 1
                     n += 1
@@ -461,7 +461,7 @@ class Bitmap(Chain):
         #~ logging.debug("findfree: found %d free clusters from #%X", n, i)
         return i, n
 
-    def findfree(self, start=2, count=0):
+    def findfree0(self, start=2, count=0):
         """Return index and length of the first free clusters run beginning from
         'start' or (-1,0) in case of failure. If 'count' is given, limit the search
         to that amount."""
@@ -482,6 +482,8 @@ class Bitmap(Chain):
             start += 1
         #~ logging.debug("findfree: found %d free clusters from #%X", n, i)
         return i, n
+
+    findfree = findfree1 # new code is ~4x faster!
 
     def findmaxrun(self, count=0):
         "Find a run of at least count clusters or the greatest run available. Returns a tuple (total_free_clusters, (run_start, clusters))"
