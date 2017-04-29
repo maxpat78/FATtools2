@@ -143,6 +143,7 @@ if __name__ == '__main__':
     par.add_option("-t", "--threshold", dest="threshold", help="limit the stress test to a given percent of the free space. Default: 99%", metavar="PERCENT", default=99, type="int")
     par.add_option("--debug", action="store_true", dest="debug", help="turn on debug logging to stress.log (may be VERY slow!). Default: OFF", metavar="DEBUG_LOG", default=False)
     par.add_option("--sha1", action="store_true", dest="sha1", help="turn on generating an hash list of generated files. Default: OFF", metavar="HASH_LOG", default=False)
+    par.add_option("--fix", action="store_true", dest="fix", help="use a fixed random seed. Default: OFF", metavar="FIX_RAND", default=False)
     opts, args = par.parse_args()
 
     if not args:
@@ -152,5 +153,8 @@ if __name__ == '__main__':
 
     if opts.debug:
         logging.basicConfig(level=logging.DEBUG, filename='stress.log', filemode='w')
+
+    if opts.fix:
+        seed(78) # so it repeates the same "random" sequences at every call
 
     stress(opts, args)
