@@ -9,8 +9,8 @@ from datetime import datetime
 import logging
 if DEBUG_EXFAT: import hexdump
 
-import disk, utils
-from FAT import boot_fat16, FAT
+import utils
+from FAT import FAT
 
 
 class boot_exfat(object):
@@ -336,17 +336,20 @@ class Chain(object):
         return 1
 
     def frags(self):
-        logging.debug("Fragmentation of %s", self)
+        if DEBUG_EXFAT: logging.debug("Fragmentation of %s", self)
+        if self.nofat:
+            if DEBUG_EXFAT: logging.debug("File is %d contig clusters from %Xh", rdiv(self.size, self.boot.cluster), self.start)
+            return 0
         runs = 0
         start = self.start
         while 1:
             length, next = self.fat.count_run(start)
             if next == start: break
             runs += 1
-            logging.debug("Run of %d clusters from %Xh (next=%Xh)", length, start, next)
+            if DEBUG_EXFAT: logging.debug("Run of %d clusters from %Xh (next=%Xh)", length, start, next)
             start = next
-        logging.debug("Detected %d fragments for %d clusters", runs, self.size/self.boot.cluster)
-        logging.debug("Fragmentation is %f", float(runs-1) / float(self.size/self.boot.cluster))
+        if DEBUG_EXFAT: logging.debug("Detected %d fragments for %d clusters", runs, self.size/self.boot.cluster)
+        if DEBUG_EXFAT: logging.debug("Fragmentation is %f", float(runs-1) / float(self.size/self.boot.cluster))
         return runs
 
 
@@ -426,40 +429,40 @@ class Bitmap(Chain):
             self.write(chr(B))
             if DEBUG_EXFAT: logging.debug("set B=0x%X", B)
     
-    def findfree1(self, start=2, count=0):
+    def findfree2(self, start=2, count=0):
         """Return index and length of the first free clusters run beginning from
-        'start' or (-1,0) in case of failure. If 'count' is given, limit the search
+        'start' or (-1,-1) in case of failure. If 'count' is given, limit the search
         to that amount."""
         if start < 2:
             start = 2
-        n = 0
-        i = -1
-        bytepos = (start-2)/8
-        self.seek(bytepos)
-        B = self.read(1)[0]
-        while True:
-            if start > self.fat.real_last:
-                return -1, -1 # is this right if we reach last valid cluster?
-            bitpos = (start-2)
-            if bytepos != bitpos/8:
+        if start >= self.fat.real_last:
+            return -1, -1
+
+        i = start-2 # initial bit to scan from
+        first_free = -1
+        run_length = -1
+        B = None
+        self.seek(i/8)
+
+        while i < self.filesize*8:
+            if not i%8 or B == None:
                 B = self.read(1)[0]
-                bytepos = (start-2)/8
-            is_set = B & (1 << (bitpos%8))
-            if not is_set:
-                while start <= self.fat.real_last and not is_set:
-                    if i < 0: i = start
-                    start += 1
-                    n += 1
-                    if n == count: break # stop search if we got the required amount
-                    bitpos = (start-2)
-                    if bytepos != bitpos/8:
-                        B = self.read(1)[0]
-                        bytepos = (start-2)/8
-                    is_set = B & (1 << (bitpos%8))
+            if not i%8 and B == '\xFF':
+                if run_length > 0: break
+                i+=8
+                continue
+            if B & (1 << (i%8)):
+                if run_length > 0: break
+                i+=1
+                continue
+            if first_free < 0:
+                first_free = i+2 # bit index to cluster index
+                run_length = 0
+            run_length += 1
+            i+=1
+            if count and count == run_length:
                 break
-            start += 1
-        #~ logging.debug("findfree: found %d free clusters from #%X", n, i)
-        return i, n
+        return first_free, run_length
 
     def findfree0(self, start=2, count=0):
         """Return index and length of the first free clusters run beginning from
@@ -483,7 +486,7 @@ class Bitmap(Chain):
         #~ logging.debug("findfree: found %d free clusters from #%X", n, i)
         return i, n
 
-    findfree = findfree1 # new code is ~4x faster!
+    findfree = findfree2 # new code is ~9x faster!
 
     def findmaxrun(self, count=0):
         "Find a run of at least count clusters or the greatest run available. Returns a tuple (total_free_clusters, (run_start, clusters))"
@@ -1366,35 +1369,6 @@ class Dirtable(object):
             print "%18s Directories" % tot_dirs
 
 
-def opendisk(path, mode='rb'):
-    "Open a FAT filesystem returning the root directory Dirtable"
-    if os.name =='nt' and len(path)==2 and path[1] == ':':
-        path = '\\\\.\\'+path
-    d = disk.disk(path, mode)
-    bs = d.read(512)
-    d.seek(0)
-    fstyp = utils.FSguess(boot_fat16(bs)) # warning: if we call this a second time on the same Win32 disk, handle is unique and seek set already!
-    if DEBUG_EXFAT: logging.debug("opendisk guessed FS type %s", fstyp)
-    if fstyp == 'EXFAT':
-        boot = boot_exfat(bs, stream=d)
-    else:
-        print "File system not recognized. Aborted."
-        sys.exit(1)
-
-    fat = FAT(d, boot.fatoffs, boot.clusters(), bitsize={'FAT12':12,'FAT16':16,'FAT32':32,'EXFAT':32}[fstyp], exfat=(fstyp=='EXFAT'))
-
-    if DEBUG_EXFAT: logging.debug("Inited BOOT object: %s", boot)
-    if DEBUG_EXFAT: logging.debug("Inited FAT object: %s", fat)
-
-    root = Dirtable(boot, fat, boot.dwRootCluster)
-    for e in root.iterator():
-        if e.type == 1: # Find & open Bitmap
-            boot.bitmap = Bitmap(boot, fat, e.dwStartCluster, e.u64DataLength)
-            break
-
-    return root
-
-
 
 def rdiv(a, b):
     "Divide a by b eventually rounding up"
@@ -1425,84 +1399,3 @@ def fat_copy_clusters(boot, fat, start):
         s = src.read(boot.cluster)
         dst.write(s)
     return target
-
-
-def fat_copy_tree_extract(base, dest, callback=None, attributes=None, chunk_size=1<<20):
-    """Copy recursively files and directories under virtual 'base' Dirtable into
-    real 'dest' directory, 'chunk_size' bytes at a time, calling callback function if provided
-    [and preserving date and times if desired]."""
-    for root, folders, files in base.walk():
-        for file in files:
-            src = os.path.join(root, file)
-            dst = os.path.join(dest, src[len(base.path)+1:])
-            if base.path == os.path.dirname(src):
-                fpi = base.open(file)
-            else:
-                fpi = base.opendir(os.path.dirname(src)[len(base.path)+1:]).open(file)
-            assert fpi.IsValid != False
-            try:
-                os.makedirs(os.path.dirname(dst))
-            except:
-                pass
-            fpo = open(dst, 'wb')
-            if callback: callback(src)
-            while True:
-                s = fpi.read(chunk_size)
-                if not s: break
-                fpo.write(s)
-            fpo.close()
-            fpi.close() # If closing is deferred to atexit, massive KeyError exceptions are generated by disk.py in cache_flush: investigate!
-
-
-def fat_copy_tree_inject(base, dest, callback=None, attributes=None, chunk_size=1<<20):
-    """Copy recursively files and directories under real 'base' path into
-    virtual 'dest' directory table, 'chunk_size' bytes at a time, calling callback function if provided
-    and preserving date and times if desired."""
-
-    for root, folders, files in os.walk(base):
-        relative_dir = root[len(base)+1:]
-        # Split subdirs in target path
-        subdirs = []
-        while 1:
-            pro, epi = os.path.split(relative_dir)
-            if pro == relative_dir: break
-            relative_dir = pro
-            subdirs += [epi]
-        subdirs.reverse()
-
-        # Recursively open path to dest, creating directories if necessary
-        target_dir = dest
-        for subdir in subdirs:
-            target_dir = target_dir.mkdir(subdir)
-
-        # Finally, copy files
-        for file in files:
-            src = os.path.join(root, file)
-            fp = open(src, 'rb')
-            st = os.stat(src)
-            # Create target, preallocating all clusters
-            dst = target_dir.create(file, rdiv(st.st_size, dest.boot.cluster))
-            if callback: callback(src)
-            while 1:
-                s = fp.read(chunk_size)
-                if not s: break
-                dst.write(s)
-
-            if attributes: # bit mask: 1=preserve creation time, 2=last modification, 3=last access
-                if attributes & 1:
-                    tm = time.localtime(st.st_ctime)
-                    dw, ms = exFATDirentry.MakeDosDateTimeEx((tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec))
-                    dst.Entry.dwCTime = dw
-                    dst.chmsCTime = ms
-                if attributes & 2:
-                    tm = time.localtime(st.st_mtime)
-                    dw, ms = exFATDirentry.MakeDosDateTimeEx((tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec))
-                    dst.Entry.dwMTime = dw
-                    dst.chmsCTime = ms
-
-                if attributes & 4:
-                    tm = time.localtime(st.st_atime)
-                    dw, ms = exFATDirentry.MakeDosDateTimeEx((tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec))
-                    dst.Entry.dwATime = dw
-                    dst.chmsCTime = ms
-            dst.close()

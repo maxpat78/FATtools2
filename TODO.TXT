@@ -6,11 +6,14 @@ Advantages of common_getattr & pack technique in respect of property():
 BUGS/TODO: (disk.py)
 optimize SetFilePointer speed due to 64-bit upgrading?
 reduce real disk seeking with a variable to track disk position and avoid calling system seek?
+order dirty sector before committing to disk?
 
 
 BUGS/TODO: (FAT.py)
 - bitmap free clusters on first scan, gradually filling the bitmap? (max cost 32M for all 2^28 clusters)
-- getfreediskspace in Dirtable
+- OR at least track exact free clusters number at first findfree? OK
+- getfreediskspace in Dirtable OK
+- optimize cluster zeroing when deleting files: maxrun4len (exFAT too)
 - caching with simpler dict {start_sector: [decoded_values]} ?
 - unique handle to directories (to auto-update once on closing) (copy from exFAT?)?
 - check 255 chars limit in nested directories (investigate in exFAT too)
@@ -24,6 +27,7 @@ BUGS/TODO: (FAT.py)
 - 65,534 bytes limit for a folder?
 - use FAT32 FSInfo
 - parameters {} to tune cluster allocator?
+- cluster allocator: record last deleted cluster and optionally move back hint for new allocations? (instead of searching foward always) (exFAT too) 
 - guard against seek beyond last valid offset (specially in FixedRoot)
 - generalize pack() in utils.py
 
@@ -35,7 +39,8 @@ BUGS/TODO: (exFAT.py)
 - merge exFAT w/ FAT Chain (write) // 31.8.16 bug in FAT alloc prevented this?
 - implement set/clear Label (FAT too)
 BITMAP:
-- Bitmap findfree alternative?
+- Bitmap findfree alternative? PARTLY DONE
+- findfree2: iterate with for...in over bitmap chunks (512 byte at once)?
 - findfree with tuple (start, run) for free clusters account?
 - set ranges of bits/fat slots at once!
 - read bitmap 128 bit at once and use math to find set/clear bits?
