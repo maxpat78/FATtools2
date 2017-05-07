@@ -13,7 +13,7 @@ else:
     from Tkinter import *
     import tkMessageBox as messagebox
 
-from FAT import *
+from Volume import *
 
 
 
