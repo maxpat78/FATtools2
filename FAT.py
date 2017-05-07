@@ -1,13 +1,17 @@
+# -*- coding: mbcs -*-
 # Utilities to manage a FAT12/16/32 file system
 #
 
+DEBUG_FAT=0
+
 import copy, os, struct, time, cStringIO, atexit
 from datetime import datetime
+from collections import OrderedDict
 import logging
 
 import disk, utils
 
-DEBUG_FAT=0
+if DEBUG_FAT: import hexdump
 
 class boot_fat32(object):
     "FAT32 Boot Sector"
@@ -255,7 +259,10 @@ class FAT(object):
         self.real_last = min(self.reserved-1, self.size+2-1)
         self.decoded = {} # {cluster index: cluster content}
         self.last_free_alloc = 2 # last free cluster allocated
-        self.free_clusters = None # optionally track free clusters
+        self.free_clusters = None # tracks free clusters
+        # ordered (by disk offset) dictionary {first_cluster: run_length} mapping free space
+        self.free_clusters_map = None
+        self.map_free_space()
 
     def __str__ (self):
         return "%d-bit %sFAT table of %d clusters starting @%Xh\n" % (self.bits, ('','ex')[self.exfat], self.size, self.offset)
@@ -317,7 +324,7 @@ class FAT(object):
         self.stream.seek(pos)
         value = struct.pack(self.fat_slot_fmt, value)
         self.stream.write(value)
-        if self.exfat: return # exFAT has one FAT only
+        if self.exfat: return # exFAT has one FAT only (default)
         pos = self.offset2+dsp
         #~ logging.debug("setting FAT2[%Xh]=%Xh @%Xh", index, value, pos)
         self.stream.seek(pos)
@@ -373,28 +380,6 @@ class FAT(object):
             n += 1
         return n, start
 
-    def findfree(self, start=2, count=0): # in exFAT we must look at the free clusters bitmap!
-        """Return index and length of the first free clusters run beginning from
-        'start' or (-1,0) in case of failure. If 'count' is given, limit the search
-        to that amount. (not for exFAT)"""
-        if start < 2:
-            start = 2
-        n = 0
-        i = -1
-        while 1:
-            if start > self.real_last:
-                return -1, -1 # is this right if we reach last valid cluster?
-            if self[start] == 0:
-                while self[start] == 0 and start <= self.real_last:
-                    if i < 0: i = start
-                    start += 1
-                    n += 1
-                    if n == count: break # stop search if we got the required amount
-                break
-            start += 1
-        if DEBUG_FAT: logging.debug("found %d free clusters from #%x", n, i)
-        return i, n
-
     def findmaxrun(self):
         "Find the greatest cluster run available. Returns a tuple (total_free_clusters, (run_start, clusters))"
         t = 1,0
@@ -408,9 +393,186 @@ class FAT(object):
             n += t[1]
             t = (t[0]+t[1], t[1])
         if DEBUG_FAT: logging.debug("Found the biggest run of %d clusters from #%d on %d total free clusters", maxrun[1], maxrun[0], n)
-        self.free_clusters = n
         return n, maxrun
 
+    def map_free_space(self):
+        "Maps the free clusters in an ordered dictionary {start_cluster: run_length}"
+        if self.exfat: return
+        #~ if self.bits == 12:
+            #~ return
+        startpos = self.stream.tell()
+        self.free_clusters_map = OrderedDict()
+        FREE_CLUSTERS=0
+        if self.bits < 32:
+            # FAT16 is max 130K...
+            PAGE = self.offset2 - self.offset - (2*self.bits)/8
+        else:
+            # FAT32 could reach ~1GB!
+            PAGE = 1<<20
+        END_OF_CLUSTERS = self.offset + rdiv(self.size*self.bits, 8) + (2*self.bits)/8
+        i = self.offset+(2*self.bits)/8 # address of cluster #2
+        self.stream.seek(i)
+        while i < END_OF_CLUSTERS:
+            s = self.stream.read(min(PAGE, END_OF_CLUSTERS-i)) # slurp full FAT, or 1M page if FAT32
+            if DEBUG_FAT: logging.debug("map_free_space: loaded FAT page of %d bytes @0x%X", len(s), i)
+            j=0
+            while j < len(s):
+                first_free = -1
+                run_length = -1
+                while j < len(s):
+                    if self.bits == 32:
+                        if s[j] != 0 or s[j+1] != 0 or s[j+2] != 0 or s[j+3] != 0:
+                            j += 4
+                            if run_length > 0: break
+                            continue
+                    elif self.bits == 16:
+                        if s[j] != 0 or s[j+1] != 0:
+                            j += 2
+                            if run_length > 0: break
+                            continue
+                    elif self.bits == 12:
+                        # Pick the 12 bits wanted
+                        #     0        1        2
+                        # AAAAAAAA AAAABBBB BBBBBBBB
+                        if not j%3:
+                            if s[j] != 0 or s[j+1]>>4 != 0:
+                                j += 1
+                                if run_length > 0: break
+                                continue
+                        elif j%3 == 1:
+                            j+=1
+                            continue # simply skips median byte
+                        else: # j%3==2
+                            if s[j] != 0 or s[j-1] & 0x0FFF != 0:
+                                j += 1
+                                if run_length > 0: break
+                                continue
+                    if first_free < 0:
+                        #~ if DEBUG_FAT: logging.debug("map_free_space: (%d-%d+%d)/%d=", i,self.offset,j,self.bits/8)
+                        #~ first_free = (i-self.offset+j)/(self.bits/8)
+                        first_free = (i-self.offset+j)*8/self.bits
+                        if DEBUG_FAT: logging.debug("map_free_space: found run from %d", first_free)
+                        run_length = 0
+                    run_length += 1
+                    j+=self.bits/8
+                if first_free < 0: continue
+                FREE_CLUSTERS+=run_length
+                if self.free_clusters_map:
+                    ff, rl = self.free_clusters_map.popitem()
+                    if ff+rl == first_free:
+                        if DEBUG_FAT: logging.debug("map_free_space: merging run (%d, %d) with previous one", first_free, run_length)
+                        first_free = ff
+                        run_length = rl+run_length
+                    else:
+                        self.free_clusters_map[ff] =  rl # push back item
+                self.free_clusters_map[first_free] =  run_length
+                if DEBUG_FAT: logging.debug("map_free_space: appended run (%d, %d)", first_free, run_length)
+            i += len(s) # advance to next FAT page to examine
+        self.stream.seek(startpos)
+        self.free_clusters = FREE_CLUSTERS
+        if DEBUG_FAT: logging.debug("map_free_space: %d clusters free in %d runs", FREE_CLUSTERS, len(self.free_clusters_map))
+        return FREE_CLUSTERS, len(self.free_clusters_map)
+
+    def map_free_space_new(self):
+        "Maps the free clusters in an ordered dictionary {start_cluster: run_length}"
+        if self.exfat: return
+        startpos = self.stream.tell()
+        self.free_clusters_map = OrderedDict()
+        FREE_CLUSTERS=0
+        if self.bits == 12: # Treats apart FAT12, since it's smaller (max 6K) but more complex
+            i = 2
+            while i < self.size+2:
+                first_free = -1
+                run_length = -1
+                while i < self.size+2:
+                    if self.islast(self[i]):
+                        if run_length > 0: break
+                        i+=1
+                        continue
+                    if first_free < 0:
+                        first_free = i
+                        if DEBUG_FAT: logging.debug("map_free_space: found run from %d", first_free)
+                        run_length = 0
+                    run_length += 1
+                    i+=1
+                FREE_CLUSTERS+=run_length
+                self.free_clusters_map[first_free] =  run_length
+                if DEBUG_FAT: logging.debug("map_free_space: appended run (%d, %d)", first_free, run_length)
+            self.free_clusters = FREE_CLUSTERS
+            if DEBUG_FAT: logging.debug("map_free_space: %d clusters free in %d runs", FREE_CLUSTERS, len(self.free_clusters_map))
+            return FREE_CLUSTERS, len(self.free_clusters_map)
+        if self.bits < 32:
+            # FAT16 is max 130K...
+            PAGE = self.offset2 - self.offset - (2*self.bits)/8
+        else:
+            # FAT32 could reach ~1GB!
+            PAGE = 1<<20
+        END_OF_CLUSTERS = self.offset + rdiv(self.size*self.bits, 8) + (2*self.bits)/8
+        i = self.offset+(2*self.bits)/8 # address of cluster #2
+        self.stream.seek(i)
+        while i < END_OF_CLUSTERS:
+            s = self.stream.read(min(PAGE, END_OF_CLUSTERS-i)) # slurp full FAT, or 1M page if FAT32
+            if DEBUG_FAT: logging.debug("map_free_space: loaded FAT page of %d bytes @0x%X", len(s), i)
+            j=0
+            while j < len(s):
+                first_free = -1
+                run_length = -1
+                while j < len(s):
+                    if self.bits == 32:
+                        if s[j] != 0 or s[j+1] != 0 or s[j+2] != 0 or s[j+3] != 0:
+                            j += 4
+                            if run_length > 0: break
+                            continue
+                    elif self.bits == 16:
+                        if s[j] != 0 or s[j+1] != 0:
+                            j += 2
+                            if run_length > 0: break
+                            continue
+                    if first_free < 0:
+                        first_free = (i-self.offset+j)/(self.bits/8)
+                        if DEBUG_FAT: logging.debug("map_free_space: found run from %d", first_free)
+                        run_length = 0
+                    run_length += 1
+                    j+=self.bits/8
+                if first_free < 0: continue
+                FREE_CLUSTERS+=run_length
+                if self.free_clusters_map:
+                    ff, rl = self.free_clusters_map.popitem()
+                    if ff+rl == first_free:
+                        if DEBUG_FAT: logging.debug("map_free_space: merging run (%d, %d) with previous one", first_free, run_length)
+                        first_free = ff
+                        run_length = rl+run_length
+                    else:
+                        self.free_clusters_map[ff] =  rl # push back item
+                self.free_clusters_map[first_free] =  run_length
+                if DEBUG_FAT: logging.debug("map_free_space: appended run (%d, %d)", first_free, run_length)
+            i += len(s) # advance to next FAT page to examine
+        self.stream.seek(startpos)
+        self.free_clusters = FREE_CLUSTERS
+        if DEBUG_FAT: logging.debug("map_free_space: %d clusters free in %d runs", FREE_CLUSTERS, len(self.free_clusters_map))
+        return FREE_CLUSTERS, len(self.free_clusters_map)
+
+    def findfree(self, start=2, count=0):
+        """Return index and length of the first free clusters run beginning from
+        'start' or (-1,0) in case of failure. If 'count' is given, limit the search
+        to that amount."""
+        if self.free_clusters_map == None:
+            self.map_free_space()
+        try:
+            i, n = self.free_clusters_map.popitem(0)
+        except KeyError:
+            return -1, -1
+        if DEBUG_FAT: logging.debug("got run of %d free clusters from #%x", n, i)
+        if n-count > 0:
+            self.free_clusters_map[i+count] = n-count # updates map
+        self.free_clusters-=min(n,count)
+        return i, min(n, count)
+    
+    def map_compact(self, strategy=0):
+        "TODO: consolidate contiguous runs; sort by run size" 
+        self.free_clusters_map = OrderedDict(sorted(self.free_clusters_map.items(), key=lambda t: t[0])) # sort by disk offset
+        if DEBUG_FAT: logging.debug("Free space map (%d runs):\n%s", len(self.free_clusters_map), self.free_clusters_map)
+        
     # TODO: split very large runs
     # About 12% faster injecting a Python2 tree
     def mark_run(self, start, count, clear=False):
@@ -422,7 +584,7 @@ class FAT(object):
         if clear:
             for i in xrange(start, start+count):
                 self.decoded[i] = 0
-            self.stream.write(bytearray((self.bits/8)*'\x00'))
+            self.stream.write(bytearray(count*(self.bits/8)*'\x00'))
             return
         # consecutive values to set
         L = xrange(start+1, start+1+count)
@@ -438,13 +600,13 @@ class FAT(object):
         """Allocate a chain of free clusters and appropriately mark the FATs.
         Returns the first cluster or zero in case of failure"""
         if DEBUG_FAT: logging.debug("request to allocate %d clusters from #%Xh(%d), search from #%Xh", count, start, start, self.last_free_alloc)
- 
-        if self.free_clusters != None:
-            if self.free_clusters < count:
-                if DEBUG_FAT: logging.debug("can't allocate clusters, there are only %d free", self.free_clusters)
-                return 0
-            if DEBUG_FAT: logging.debug("ok to search, %d clusters free", self.free_clusters)
-            self.free_clusters -= count
+
+        self.map_compact()
+        
+        if self.free_clusters < count:
+            if DEBUG_FAT: logging.debug("can't allocate clusters, there are only %d free", self.free_clusters)
+            raise BaseException("FATAL! Free clusters exhausted, couldn't allocate %d more!" % count)
+        if DEBUG_FAT: logging.debug("ok to search, %d clusters free", self.free_clusters)
 
         last = start
 
@@ -486,20 +648,28 @@ class FAT(object):
         return first
 
     def free(self, start):
-        "Free a clusters chain"
-        freed_clusters = 0
-        if DEBUG_FAT: logging.debug("freeing cluster chain from %Xh", start)
-        while not (self.last <= self[start] <= self.last+7): # islast
-            prev = start
-            start = self[start]
-            self[prev] = 0
-            freed_clusters += 1
-            if DEBUG_FAT: logging.debug("freed cluster %x", prev)
-        self[start] = 0
-        freed_clusters += 1
-        if DEBUG_FAT: logging.debug("freed %d clusters total, last %Xh", freed_clusters, start)
-        if self.free_clusters != None:
-            self.free_clusters += freed_clusters
+        "Free a clusters chain, one run at a time (except FAT12)"
+        while True:
+            length, next = self.count_run(start)
+            if DEBUG_FAT: logging.debug("free1: count_run returned %d, %Xh", length, next)
+            if not next: break
+            if DEBUG_FAT: logging.debug("free1: zeroing run of %d clusters from %Xh (next=%Xh)", length, start, next)
+            if self.bits == 12:
+                i=length
+                j=start
+                while i:
+                    prev = j
+                    j = self[j]
+                    self[prev] = 0
+                    if DEBUG_FAT: logging.debug("free1: zeroing cluster %Xh (next=%Xh)", prev, j)
+                    i-=1
+            else:
+                self.mark_run(start, length, True)
+            if not self.exfat:
+                self.free_clusters += length
+                self.free_clusters_map[start] = length
+            start = next
+
 
 
 class Chain(object):
@@ -1016,6 +1186,7 @@ class FATDirentry(Direntry):
         return (name[:i] + tilde + ext[1:4]).upper()
 
     def GenRawSlotFromName(self, shortname, longname=None):
+        # Is presence of invalid (Unicode?) chars checked?
         shortname, chFlags = self.GenRawShortName(shortname)
 
         cdate, ctime = self.GetDosDateTime()
@@ -1023,31 +1194,28 @@ class FATDirentry(Direntry):
         self._buf = bytearray(struct.pack('<11s3B7HI', shortname, 0x20, chFlags, 0, ctime, cdate, cdate, 0, ctime, cdate, 0, 0))
 
         if longname:
-            def pad(s, l):
-                "Pad free name space with 0xFF filler"
-                if s == None:
-                    return '\xFF'*l
-                if len(s) < l:
-                    return s + '\xFF'*(l-len(s))
-                return s
-
             csum = self.Checksum(shortname)
-            # If name fills the last slot (=is multiple of 13 chars), NULL may be omitted
-            istr = cStringIO.StringIO(longname+('\x00','')[len(longname)%13==0]) # optionally NULL terminated string
-            seqn = 1
-            ch3 = ' '
-            while ch3[0] != '\xFF':
-                ch1 = istr.read(5).encode('utf-16le')
-                if not ch1: break
-                ch1 = pad(ch1, 10)
-                ch2 = istr.read(6).encode('utf-16le')
-                ch2 = pad(ch2, 12)
-                ch3 = istr.read(2).encode('utf-16le')
-                ch3 = pad(ch3, 4)
-                self._buf = bytearray(struct.pack('<B10s3B12sH4s', seqn, ch1, 0xF, 0, csum, ch2, 0, ch3)) + self._buf
-                seqn += 1
-            self._buf[0] = self._buf[0] | 0x40 # mark the last slot (first to appear)
-
+            longname = longname.decode('cp1252').encode('utf-16le')
+            # If the last slot isn't filled, we must NULL terminate
+            if len(longname) % 26:
+                longname += '\x00\x00'
+            # And eventually pad with 0xFF, also
+            if len(longname) % 26:
+                longname += '\xFF'*(26 - len(longname)%26)
+            slots = len(longname)/26
+            B=bytearray()
+            while slots:
+                b = bytearray(32)
+                b[0] = slots
+                b[1:11] = longname[(slots-1)*26+0:(slots-1)*26+10]
+                b[11] = 0xF
+                b[13] = csum
+                b[14:27] = longname[(slots-1)*26+10:(slots-1)*26+22]
+                b[28:32] = longname[(slots-1)*26+22:(slots-1)*26+26]
+                B += b
+                slots -= 1
+            B[0] = B[0] | 0x40 # mark the last slot (first to appear)
+            self._buf = B+self._buf
 
     @staticmethod
     def IsShortName(name):
@@ -1111,16 +1279,12 @@ class Dirtable(object):
         else:
             self.stream = Chain(boot, fat, startcluster, (boot.cluster*fat.count(startcluster)[0], size)[size>0])
         if startcluster not in Dirtable.dirtable:
-            Dirtable.dirtable[startcluster] = {'LFNs':{}, 'Names':{}}
+            Dirtable.dirtable[startcluster] = {'LFNs':{}, 'Names':{}} # LFNs key MUST be an UTF-8 byte sequence!
 
     def getdiskspace(self):
         "Return the disk free space in a tuple (clusters, bytes)"
-        if self.fat.free_clusters != None:
-            free_clusters = self.fat.free_clusters
-        else:
-            free_clusters = self.fat.findmaxrun()[0]
-        free_bytes = free_clusters * self.boot.cluster
-        return (free_clusters, free_bytes)
+        free_bytes = self.fat.free_clusters * self.boot.cluster
+        return (self.fat.free_clusters, free_bytes)
 
     def open(self, name):
         "Open the chain corresponding to an existing file name"
@@ -1308,12 +1472,12 @@ class Dirtable(object):
             del Dirtable.dirtable[self.start]['Names'][it.ShortName().lower()]
             ln = it.LongName()
             if ln:
-                del Dirtable.dirtable[self.start]['LFNs'][ln.lower()]
+                del Dirtable.dirtable[self.start]['LFNs'][ln.encode('utf8').lower()]
             return
         Dirtable.dirtable[self.start]['Names'][it.ShortName().lower()] = it
         ln = it.LongName()
         if ln:
-            Dirtable.dirtable[self.start]['LFNs'][ln.lower()] = it
+            Dirtable.dirtable[self.start]['LFNs'][ln.encode('utf8').lower()] = it
 
     def find(self, name):
         "Find an entry by name. Returns it or None if not found"
@@ -1321,7 +1485,9 @@ class Dirtable(object):
         if not Dirtable.dirtable[self.start]['Names']:
             for it in self.iterator():
                 self._update_dirtable(it)
-        name = name.lower()
+        if DEBUG_FAT: logging.debug("find: searching for %s (%s lower-cased)", name, name.lower())
+        if DEBUG_FAT: logging.debug("find: LFNs=%s", Dirtable.dirtable[self.start]['LFNs'])
+        name = name.decode('mbcs').encode('utf8').lower()
         return Dirtable.dirtable[self.start]['LFNs'].get(name) or \
         Dirtable.dirtable[self.start]['Names'].get(name)
 
@@ -1447,6 +1613,10 @@ class Dirtable(object):
         self.stream.write(bytearray(unused)) # blank unused area
         if DEBUG_FAT: logging.debug("Sorted directory table freeing %d slots", unused/32)
 
+    def listdir(self):
+        "Return a list of file and directory names in this directory, sorted by on disk position"
+        return map(lambda o:o.Name(), [o for o in self.iterator()])
+
     def list(self, bare=False):
         "Simple directory listing, with size and last modification time"
         print "   Directory of", self.path, "\n"
@@ -1465,7 +1635,7 @@ class Dirtable(object):
                 print "%8s  %s  %s" % ((str(it.dwFileSize),'<DIR>')[it.IsDir()], mtime, it.Name())
         if not bare:
             print "%18s Files    %s bytes" % (tot_files, tot_bytes)
-            print "%18s Directories" % tot_dirs
+            print "%18s Directories %12s bytes free" % (tot_dirs, self.getdiskspace()[1])
 
     def walk(self):
         """Walk across this directory and its childs. For each visited directory,

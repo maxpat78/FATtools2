@@ -6,6 +6,7 @@ DEBUG_EXFAT=0
 
 import copy, os, struct, time, cStringIO, atexit
 from datetime import datetime
+from collections import OrderedDict
 import logging
 if DEBUG_EXFAT: import hexdump
 
@@ -371,15 +372,68 @@ class Bitmap(Chain):
         self.vco = -1
         self.lastvlcn = (0, cluster) # last cluster VCN & LCN
         self.last_free_alloc = 2
-        self.free_clusters = None # optionally track free clusters
-        self.runs = {} # {pos: QWORD}
         # Bitmap always uses FAT, even if contig, but is fixed size
         self.nofat = self.size == self.maxrun4len(self.size)
+        self.free_clusters = None # tracks free clusters number
+        self.free_clusters_map = None
+        self.map_free_space()
         if DEBUG_EXFAT: logging.debug("exFAT Bitmap of %d bytes (%d clusters) @%Xh", self.filesize, self.filesize*8, self.start)
 
     def __str__ (self):
         return "exFAT Bitmap of %d bytes (%d clusters) @%Xh" % (self.filesize, self.filesize*8, self.start)
 
+    def map_free_space(self):
+        "Maps the free clusters in an ordered dictionary {start_cluster: run_length}"
+        self.free_clusters_map = OrderedDict()
+        FREE_CLUSTERS=0
+        # Bitmap could reach 512M!
+        PAGE = 1<<20
+        END_OF_CLUSTERS = self.filesize
+        i = 0 # address of cluster #2
+        self.seek(i)
+        while i < END_OF_CLUSTERS:
+            s = self.read(min(PAGE, END_OF_CLUSTERS-i)) # slurp full bitmap, or 1M page
+            if DEBUG_EXFAT: logging.debug("map_free_space: loaded Bitmap page of %d bytes @0x%X", len(s), i)
+            j=0
+            while j < len(s)*8:
+                first_free = -1
+                run_length = -1
+                while j < len(s)*8:
+                    if not j%8 and s[j/8] == '\xFF':
+                        if run_length > 0: break
+                        j+=8
+                        continue
+                    if s[j/8] & (1 << (j%8)):
+                        if run_length > 0: break
+                        j+=1
+                        continue
+                    if first_free < 0:
+                        first_free = j+2+i*8
+                        run_length = 0
+                    run_length += 1
+                    j+=1
+                if first_free < 0: continue
+                FREE_CLUSTERS+=run_length
+                if self.free_clusters_map:
+                    ff, rl = self.free_clusters_map.popitem()
+                    if ff+rl == first_free:
+                        if DEBUG_EXFAT: logging.debug("map_free_space: merging run (%d, %d) with previous one", first_free, run_length)
+                        first_free = ff
+                        run_length = rl+run_length
+                    else:
+                        self.free_clusters_map[ff] =  rl # push back item
+                self.free_clusters_map[first_free] =  run_length
+                if DEBUG_EXFAT: logging.debug("map_free_space: appended run (%d, %d)", first_free, run_length)
+            i += len(s) # advance to next Bitmap page to examine
+        self.free_clusters = FREE_CLUSTERS
+        if DEBUG_EXFAT: logging.debug("map_free_space: %d clusters free in %d runs", FREE_CLUSTERS, len(self.free_clusters_map))
+        return FREE_CLUSTERS, len(self.free_clusters_map)
+
+    def map_compact(self, strategy=0):
+        "TODO: consolidate contiguous runs; sort by run size" 
+        self.free_clusters_map = OrderedDict(sorted(self.free_clusters_map.items(), key=lambda t: t[0])) # sort by disk offset
+        if DEBUG_EXFAT: logging.debug("Free space map (%d runs):\n%s", len(self.free_clusters_map), self.free_clusters_map)
+        
     def isset(self, cluster):
         "Test if the bit corresponding to a given cluster is set"
         assert cluster > 1
@@ -429,64 +483,21 @@ class Bitmap(Chain):
             self.write(chr(B))
             if DEBUG_EXFAT: logging.debug("set B=0x%X", B)
     
-    def findfree2(self, start=2, count=0):
+    def findfree(self, start=2, count=0):
         """Return index and length of the first free clusters run beginning from
         'start' or (-1,-1) in case of failure. If 'count' is given, limit the search
         to that amount."""
-        if start < 2:
-            start = 2
-        if start >= self.fat.real_last:
+        if self.free_clusters_map == None:
+            self.map_free_space()
+        try:
+            i, n = self.free_clusters_map.popitem(0)
+        except KeyError:
             return -1, -1
-
-        i = start-2 # initial bit to scan from
-        first_free = -1
-        run_length = -1
-        B = None
-        self.seek(i/8)
-
-        while i < self.filesize*8:
-            if not i%8 or B == None:
-                B = self.read(1)[0]
-            if not i%8 and B == '\xFF':
-                if run_length > 0: break
-                i+=8
-                continue
-            if B & (1 << (i%8)):
-                if run_length > 0: break
-                i+=1
-                continue
-            if first_free < 0:
-                first_free = i+2 # bit index to cluster index
-                run_length = 0
-            run_length += 1
-            i+=1
-            if count and count == run_length:
-                break
-        return first_free, run_length
-
-    def findfree0(self, start=2, count=0):
-        """Return index and length of the first free clusters run beginning from
-        'start' or (-1,0) in case of failure. If 'count' is given, limit the search
-        to that amount."""
-        if start < 2:
-            start = 2
-        n = 0
-        i = -1
-        while 1:
-            if start > self.fat.real_last:
-                return -1, -1 # is this right if we reach last valid cluster?
-            if not self.isset(start):
-                while start <= self.fat.real_last and not self.isset(start):
-                    if i < 0: i = start
-                    start += 1
-                    n += 1
-                    if n == count: break # stop search if we got the required amount
-                break
-            start += 1
-        #~ logging.debug("findfree: found %d free clusters from #%X", n, i)
-        return i, n
-
-    findfree = findfree2 # new code is ~9x faster!
+        if DEBUG_EXFAT: logging.debug("got run of %d free clusters from #%x", n, i)
+        if n-count > 0:
+            self.free_clusters_map[i+count] = n-count # updates map
+        self.free_clusters-=min(n,count)
+        return i, min(n, count)
 
     def findmaxrun(self, count=0):
         "Find a run of at least count clusters or the greatest run available. Returns a tuple (total_free_clusters, (run_start, clusters))"
@@ -502,7 +513,6 @@ class Bitmap(Chain):
             if count and maxrun[1] >= count: break # break if we found the required run
             t = (t[0]+t[1], t[1])
         if DEBUG_EXFAT: logging.debug("Found the biggest run of %d clusters from #%d on %d total clusters", maxrun[1], maxrun[0], n)
-        self.free_clusters = n
         return n, maxrun
 
     def alloc(self, count, start=2, first=0, nofat=False):
@@ -518,12 +528,14 @@ class Bitmap(Chain):
         alloc(n, x, y) to expand it."""
         if DEBUG_EXFAT: logging.debug("alloc: requested %d cluster(s) from 0x%X", count, start)
 
-        if self.free_clusters != None:
-            if self.free_clusters < count:
-                if DEBUG_EXFAT: logging.debug("can't allocate clusters, there are only %d free", self.free_clusters)
-                return 0
-            if DEBUG_EXFAT: logging.debug("ok to search, %d clusters free", self.free_clusters)
-            self.free_clusters -= count
+        self.map_compact()
+
+        if self.free_clusters < count:
+            if DEBUG_EXFAT: logging.debug("can't allocate clusters, there are only %d free", self.free_clusters)
+            raise BaseException("FATAL! Free clusters exhausted, couldn't allocate %d more!" % count)
+        if DEBUG_EXFAT: logging.debug("ok to search, %d clusters free", self.free_clusters)
+
+        self.free_clusters -= count
 
         last = start
         is_contiguous = False # tell if the full set of clusters, previously and actually allocates, is not fragmented
@@ -584,24 +596,19 @@ class Bitmap(Chain):
         if DEBUG_EXFAT: logging.debug("clusters successfully allocated from 0x%X%s", first, ('',' in a contiguous run')[is_contiguous])
         return first, is_contiguous
 
-    # TODO: detect FAT runs, and clear bits sequences accordingly w/ maxrun4len?
     def free(self, start):
         "Free the Bitmap following a clusters chain"
         if DEBUG_EXFAT: logging.debug("freeing cluster chain from %Xh", start)
-        freed_clusters = 0
-        while not (self.fat.last <= self.fat[start] <= self.fat.last+7): # islast
-            prev = start
-            start = self.fat[start]
-            #~ self.fat[prev] = 0 # FAT itself can remain dirty?
-            self.set(prev, clear=True)
-            freed_clusters += 1
-            if DEBUG_EXFAT: logging.debug("freed cluster %x", prev)
-        #~ self.fat[start] = 0
-        self.set(start, clear=True)
-        freed_clusters += 1
-        if self.free_clusters != None:
-            self.free_clusters += freed_clusters
-        if DEBUG_EXFAT: logging.debug("freed last cluster %Xh", start)
+        while True:
+            length, next = self.fat.count_run(start)
+            if DEBUG_EXFAT: logging.debug("free1: count_run returned %d, %Xh", length, next)
+            if not next: break
+            if DEBUG_EXFAT: logging.debug("free1: zeroing run of %d clusters from %Xh (next=%Xh)", length, start, next)
+            self.set(start, length, True) # clears bitmap only, FAT can be dirty
+            # Updates free clusters count & map
+            self.free_clusters += length
+            self.free_clusters_map[start] = length
+            start = next
 
 
 
@@ -884,7 +891,9 @@ class exFATDirentry(Direntry):
     def GetNameHash(name):
         "Computate the Stream Extension file name hash (UTF-16 LE encoded)"
         hash = 0
-        name = name.upper()
+        #~ name = name.upper()
+        # 'à' == 'à'.upper() BUT u'à' != u'à'.upper()
+        name = name.decode('utf-16le').upper().encode('utf-16le') 
         for c in name:
             hash = (((hash<<15) | (hash >> 1)) & 0xFFFF) + ord(c)
             hash &= 0xFFFF
@@ -911,8 +920,10 @@ class exFATDirentry(Direntry):
         self.chmsCTime = self.chmsMTime = self.chmsATime = cms
         # Stream Extension part
         self.chSecondaryFlags = 1 # base value, to show the entry could be allocated
-        self.chNameLength = len(name)
-        name = name.encode('utf-16le')
+        #~ self.chNameLength = len(name)
+        #~ name = name.encode('utf-16le')
+        name = name.decode('mbcs').encode('utf-16le')
+        self.chNameLength = len(name)/2
         self.wNameHash = self.GetNameHash(name)
 
         self.pack()
@@ -957,16 +968,12 @@ class Dirtable(object):
         if self.start not in Dirtable.dirtable:
             # Names maps lowercased names and Direntry slots
             # Handle contains the unique Handle to the directory table
-            Dirtable.dirtable[self.start] = {'Names':{}, 'Handle':None}
+            Dirtable.dirtable[self.start] = {'Names':{}, 'Handle':None} # Names key MUST be Python Unicode!
 
     def getdiskspace(self):
         "Return the disk free space in a tuple (clusters, bytes)"
-        if self.boot.bitmap.free_clusters != None:
-            free_clusters = self.boot.bitmap.free_clusters
-        else:
-            free_clusters = self.boot.bitmap.findmaxrun()[0]
-        free_bytes = free_clusters * self.boot.cluster
-        return (free_clusters, free_bytes)
+        free_bytes = self.boot.bitmap.free_clusters * self.boot.cluster
+        return (self.boot.bitmap.free_clusters, free_bytes)
 
     def open(self, name):
         "Open the slot corresponding to an existing file name"
@@ -1181,7 +1188,7 @@ class Dirtable(object):
             for it in self.iterator():
                 if it.type == 5:
                     self._update_dirtable(it)
-        name = name.lower()
+        name = name.lower().decode('mbcs')
         return Dirtable.dirtable[self.start]['Names'].get(name)
 
     def dump(self, n, range=3):
@@ -1366,7 +1373,7 @@ class Dirtable(object):
                 print "%8s  %s  %s" % ((str(it.u64DataLength),'<DIR>')[it.IsDir()], mtime, it.Name())
         if not bare:
             print "%18s Files    %s bytes" % (tot_files, tot_bytes)
-            print "%18s Directories" % tot_dirs
+            print "%18s Directories %12s bytes free" % (tot_dirs, self.getdiskspace()[1])
 
 
 

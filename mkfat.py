@@ -1,4 +1,4 @@
-import utils, struct, disk, os, sys, pprint
+import utils, struct, disk, os, sys, pprint, optparse, mkexfat
 from FAT import *
 
 """ FROM https://support.microsoft.com/en-us/kb/140365
@@ -53,6 +53,8 @@ def fat12_mkfs(stream, size, sector=512, params={}):
 
     if sectors < 16 or sectors > 0xFFFFFFFF:
         return 1
+
+    # NOTE: Windows 10 CHKDSK assumes a 2847 clustered floppy even if fat12_mkfs formated a smaller one!!! 
 
     # Minimum is 1 (Boot)
     if 'reserved_size' in params:
@@ -451,7 +453,8 @@ def fat32_mkfs(stream, size, sector=512, params={}):
     if 'backup_sectors' in params:
         boot.wBootCopySector = params['backup_sectors'] # typically 6
     else:
-        boot.wBootCopySector = 0
+        #~ boot.wBootCopySector = 0
+        boot.wBootCopySector = 6
     boot.dwVolumeID = FATDirentry.GetDosDateTime(1)
     boot.sVolumeLabel = '%-11s' % 'NO NAME'
     boot.sFSType = '%-8s' % 'FAT32'
@@ -511,18 +514,57 @@ def fat32_mkfs(stream, size, sector=512, params={}):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print "mkfat error: you must specify a target volume to apply a FAT12/16/32 file system!"
+    help_s = """
+    %prog [options] <drive>
+    """
+    par = optparse.OptionParser(usage=help_s, version="%prog 1.0", description="Applies a FAT12/16/32 or exFAT File System to a disk device or file image.")
+    par.add_option("-t", "--fstype", dest="fs_type", help="try to apply the specified File System between FAT12, FAT16, FAT32 or EXFAT. Default: based on medium size.", metavar="FSTYPE", type="string")
+    par.add_option("-c", "--cluster", dest="cluster_size", help="force a specified cluster size between 512, 1024, 2048, 4096, 8192, 16384, 32768 (since MS-DOS) or 65536 bytes (Windows NT+) for FAT. exFAT permits up to 32M. Default: based on medium size. Accepts 'k' and 'm' postfix for Kibibytes and Mebibytes.", metavar="CLUSTER")
+    opts, args = par.parse_args()
+
+    if not args:
+        print "mkfat error: you must specify a target volume to apply a FAT12/16/32 or exFAT file system!"
+        par.print_help()
         sys.exit(1)
 
-    if os.name == 'nt' and len(sys.argv[1])==2 and sys.argv[1][1]==':':
-        disk_name = '\\\\.\\'+sys.argv[1]
+    if os.name == 'nt' and len(args[0])==2 and args[0][1]==':':
+        disk_name = '\\\\.\\'+args[0]
     else:
-        disk_name = sys.argv[1]
+        disk_name = args[0]
     dsk = disk.disk(disk_name, 'r+b')
 
-    params = {'reserved_size':32, 'backup_sectors':6}
-    if len(sys.argv)==3:
-        params['wanted_cluster'] = int(sys.argv[2])
+    if dsk.size < 127<<20: # 127M
+        format = fat12_mkfs
+    elif 127<<20 <= dsk.size < 2047<<20: # 2G
+        format = fat16_mkfs
+    elif 2047<<20 <= dsk.size < 126<<30: # 126G, but could be up to 8T w/ 32K cluster
+        format = fat32_mkfs
+    else:
+        format = mkexfat.exfat_mkfs # can be successfully applied to an 1.44M floppy, too!
+    
+    if opts.fs_type:
+        t = opts.fs_type.lower()
+        if t == 'fat12':
+            format = fat12_mkfs
+        if t == 'fat16':
+            format = fat16_mkfs
+        if t == 'fat32':
+            format = fat32_mkfs
+        if t == 'exfat':
+            format = mkexfat.exfat_mkfs
+        else:
+            print "mkfat error: bad file system specified!"
+            par.print_help()
+            sys.exit(1)
 
-    fat32_mkfs(dsk, dsk.size, params=params)
+    params = {}
+    if opts.cluster_size:
+        t = opts.cluster_size.lower()
+        if t[-1] == 'k':
+            params['wanted_cluster'] = int(opts.cluster_size[:-1])<<10
+        elif t[-1] == 'm':
+            params['wanted_cluster'] = int(opts.cluster_size[:-1])<<20
+        else:
+            params['wanted_cluster'] = int(opts.cluster_size)
+
+    format(dsk, dsk.size, params=params)
