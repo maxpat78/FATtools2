@@ -862,10 +862,11 @@ class exFATDirentry(Direntry):
         "Get or set the slot's Label DOS permission"
         return self.type == 0x03
 
+    special_lfn_chars = '''"*/:<>?\|''' + ''.join([chr(c) for c in range(32)])
+
     @staticmethod
     def IsValidDosName(name):
-        special = ''':?/|\<>'''
-        for c in special:
+        for c in exFATDirentry.special_lfn_chars:
             if c in name:
                 return False
         return True

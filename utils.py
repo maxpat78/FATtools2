@@ -10,6 +10,9 @@ class BadRecord(Exception):
 class BadIndex(Exception):
 	pass
 
+class BadDOSName(Exception):
+	pass
+
 def class2str(c, s):
 	"Enumera in tabella nomi e valori dal layout di una classe"
 	keys = c._kv.keys()
