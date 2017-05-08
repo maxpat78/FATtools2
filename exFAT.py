@@ -921,8 +921,6 @@ class exFATDirentry(Direntry):
         self.chmsCTime = self.chmsMTime = self.chmsATime = cms
         # Stream Extension part
         self.chSecondaryFlags = 1 # base value, to show the entry could be allocated
-        #~ self.chNameLength = len(name)
-        #~ name = name.encode('utf-16le')
         name = name.decode('mbcs').encode('utf-16le')
         self.chNameLength = len(name)/2
         self.wNameHash = self.GetNameHash(name)
@@ -1054,6 +1052,8 @@ class Dirtable(object):
 
     def create(self, name, prealloc=0):
         "Create a new file chain and the associated slot. Erase pre-existing filename."
+        if not exFATDirentry.IsValidDosName(name):
+            raise utils.BadDOSName("Invalid characters in name '%s'" % name)
         e = self.open(name)
         if e.IsValid:
             e.IsValid = False
