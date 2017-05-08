@@ -1234,12 +1234,16 @@ class FATDirentry(Direntry):
                 is_8dot3 = True
         return is_8dot3
 
+    special_short_chars = ''' "*/:<>?\|[]+.,;=''' + ''.join([chr(c) for c in range(32)])
+    special_lfn_chars = '''"*/:<>?\|''' + ''.join([chr(c) for c in range(32)])
+
     @staticmethod
     def IsValidDosName(name, lfn=False):
+        if name[0] == '\xE5': return False
         if lfn:
-            special = ''':?/|\<>'''
+            special = FATDirentry.special_lfn_chars
         else:
-            special = ''' .:?+,;=[]/|\<>'''
+            special = FATDirentry.special_short_chars
         for c in special:
             if c in name:
                 return False
@@ -1279,7 +1283,7 @@ class Dirtable(object):
         else:
             self.stream = Chain(boot, fat, startcluster, (boot.cluster*fat.count(startcluster)[0], size)[size>0])
         if startcluster not in Dirtable.dirtable:
-            Dirtable.dirtable[startcluster] = {'LFNs':{}, 'Names':{}} # LFNs key MUST be an UTF-8 byte sequence!
+            Dirtable.dirtable[startcluster] = {'LFNs':{}, 'Names':{}} # LFNs key MUST be Unicode!
 
     def getdiskspace(self):
         "Return the disk free space in a tuple (clusters, bytes)"
@@ -1359,6 +1363,9 @@ class Dirtable(object):
         if e.IsValid:
             e.IsValid = False
             self.erase(name)
+        # Check if it is a supported name (=at least valid LFN)
+        if not FATDirentry.IsValidDosName(name, True):
+            raise utils.BadDOSName("Invalid characters in name '%s'" % name)
         handle = self._alloc(name, prealloc)
         self.stream.seek(handle.Entry._pos)
         self.stream.write(handle.Entry.pack())
@@ -1373,7 +1380,7 @@ class Dirtable(object):
         if r:
             if DEBUG_FAT: logging.debug("mkdir('%s') failed, entry already exists!", name)
             return r
-        # Check if it is a supported name (=at most LFN)
+        # Check if it is a supported name (=at least valid LFN)
         if not FATDirentry.IsValidDosName(name, True):
             if DEBUG_FAT: logging.debug("mkdir('%s') failed, name contains invalid chars!", name)
             return None
@@ -1472,12 +1479,12 @@ class Dirtable(object):
             del Dirtable.dirtable[self.start]['Names'][it.ShortName().lower()]
             ln = it.LongName()
             if ln:
-                del Dirtable.dirtable[self.start]['LFNs'][ln.encode('utf8').lower()]
+                del Dirtable.dirtable[self.start]['LFNs'][ln.lower()]
             return
         Dirtable.dirtable[self.start]['Names'][it.ShortName().lower()] = it
         ln = it.LongName()
         if ln:
-            Dirtable.dirtable[self.start]['LFNs'][ln.encode('utf8').lower()] = it
+            Dirtable.dirtable[self.start]['LFNs'][ln.lower()] = it
 
     def find(self, name):
         "Find an entry by name. Returns it or None if not found"
@@ -1487,7 +1494,7 @@ class Dirtable(object):
                 self._update_dirtable(it)
         if DEBUG_FAT: logging.debug("find: searching for %s (%s lower-cased)", name, name.lower())
         if DEBUG_FAT: logging.debug("find: LFNs=%s", Dirtable.dirtable[self.start]['LFNs'])
-        name = name.decode('mbcs').encode('utf8').lower()
+        name = name.decode('mbcs').lower()
         return Dirtable.dirtable[self.start]['LFNs'].get(name) or \
         Dirtable.dirtable[self.start]['Names'].get(name)
 

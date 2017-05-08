@@ -546,11 +546,11 @@ if __name__ == '__main__':
         t = opts.fs_type.lower()
         if t == 'fat12':
             format = fat12_mkfs
-        if t == 'fat16':
+        elif t == 'fat16':
             format = fat16_mkfs
-        if t == 'fat32':
+        elif t == 'fat32':
             format = fat32_mkfs
-        if t == 'exfat':
+        elif t == 'exfat':
             format = mkexfat.exfat_mkfs
         else:
             print "mkfat error: bad file system specified!"
