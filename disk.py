@@ -116,7 +116,7 @@ class disk(object):
 		self.buf = None # read buffer
 		self.blocksize = 512 # fixed sector size
 		# Cache only small 512 sectors
-		self.rawcache = bytearray(512<<10) # 512K cache buffer
+		self.rawcache = bytearray(1024<<10) # 1M cache buffer
 		self.cache = memoryview(self.rawcache)
 		self.cache_index = 0 # offset of next cache slot
 		self.cache_hits = 0 # sectors retrieved from cache
@@ -171,8 +171,7 @@ class disk(object):
 			if DEBUG_DISK: logging.debug("%s: dirty sector #%d committed to disk from cache[%d]", self, sector,i/512)
 			return
 		if DEBUG_DISK: logging.debug("%s: committing %d dirty sectors to disk", self, len(self.cache_dirties))
-		# Should writes be ordered and merged if possible?
-		for sec in self.cache_dirties:
+		for sec in sorted(self.cache_dirties):
 			self._file.seek(sec*self.blocksize)
 			try:
 				i = self.cache_table[sec]

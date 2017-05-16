@@ -1,5 +1,5 @@
 import utils, struct, disk, os, sys, math
-#~ import pprint
+import pprint
 
 """ FROM https://support.microsoft.com/en-us/kb/140365
 Default cluster sizes for exFAT

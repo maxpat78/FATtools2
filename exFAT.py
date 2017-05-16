@@ -7,11 +7,17 @@ DEBUG_EXFAT=0
 import copy, os, struct, time, cStringIO, atexit
 from datetime import datetime
 from collections import OrderedDict
-import logging
-if DEBUG_EXFAT: import hexdump
 
 import utils
 from FAT import FAT
+
+if DEBUG_EXFAT:
+    import hexdump
+    import logging
+
+
+class exFATException(Exception):
+	pass
 
 
 class boot_exfat(object):
@@ -206,7 +212,7 @@ class Chain(object):
                 if not ((cluster >= 2 and cluster <= self.fat.real_last) or \
                 (self.fat.last <= cluster <= self.fat.last+7) or \
                 cluster == self.fat.bad):
-                    raise utils.EndOfStream
+                    raise exFATException("%s: end of stream reached while seeking!"%self)
             self.lastvlcn = (self.vcn, cluster)
             #~ if self.fat.islast(cluster):
             if (self.fat.last <= cluster <= self.fat.last+7):
@@ -306,12 +312,12 @@ class Chain(object):
         self.seek(self.pos)
         if new_allocated:
             if self.pos < self.size:
-                logging.debug("Chain%08X: blanking newly allocated cluster tip, %d bytes @0x%X", self.start, self.size-self.pos, self.pos)
+                if DEBUG_EXFAT: logging.debug("Chain%08X: blanking newly allocated cluster tip, %d bytes @0x%X", self.start, self.size-self.pos, self.pos)
                 self.stream.write(bytearray(self.size - self.pos))
 
     def trunc(self):
         "Truncate the chain to actual offset, freeing subsequent clusters accordingly"
-        logging.debug("called trunc() on %s @%d", self, self.pos)
+        if DEBUG_EXFAT: logging.debug("called trunc() on %s @%d", self, self.pos)
         n = self.size/self.boot.cluster # number of clusters
         nf = (self.size-self.pos)/self.boot.cluster # number of clusters to free
         if n == 1 or not nf: return 0
@@ -320,7 +326,7 @@ class Chain(object):
             st = self.start+1
         else:
             st = self.fat.count_to(self.start, end)
-        logging.debug("Truncating %s to %d by %d clusters (#%Xh new last cluster)", self, self.pos, nf, st)
+        if DEBUG_EXFAT: logging.debug("Truncating %s to %d by %d clusters (#%Xh new last cluster)", self, self.pos, nf, st)
         if self.nofat:
             # Simply mark the free clusters
             self.boot.bitmap.set(st, nf, True)
@@ -532,7 +538,7 @@ class Bitmap(Chain):
 
         if self.free_clusters < count:
             if DEBUG_EXFAT: logging.debug("can't allocate clusters, there are only %d free", self.free_clusters)
-            raise BaseException("FATAL! Free clusters exhausted, couldn't allocate %d more!" % count)
+            raise exFATException("FATAL! Free clusters exhausted, couldn't allocate %d more!" % count)
         if DEBUG_EXFAT: logging.debug("ok to search, %d clusters free", self.free_clusters)
 
         self.free_clusters -= count
@@ -790,7 +796,7 @@ class exFATDirentry(Direntry):
         self._kv = {}
         self.type = self._buf[0] & 0x7F
         if self.type == 0 or self.type not in self.slot_types:
-            logging.warning("Unknown slot type: %Xh", self.type)
+            if DEBUG_EXFAT: logging.warning("Unknown slot type: %Xh", self.type)
         self._kv = self.slot_types[self.type][0].copy() # select right slot ype
         self._name = self.slot_types[self.type][1]
         self._vk = {} # { name: offset}
@@ -800,7 +806,7 @@ class exFATDirentry(Direntry):
             for k in (1,3,4,8,0x14,0x18):
                 self._kv[k+32] = self.stream_extension_layout[k]
                 self._vk[self.stream_extension_layout[k][0]] = k+32
-        #~ logging.debug("Decoded %s", self)
+        #~ if DEBUG_EXFAT: logging.debug("Decoded %s", self)
 
     __getattr__ = utils.common_getattr
 
@@ -939,7 +945,7 @@ class exFATDirentry(Direntry):
             k+=j
             self._buf += b
 
-        #~ logging.debug("GenRawSlotFromName returned:\n%s", hexdump.hexdump(str(self._buf),'return'))
+        #~ if DEBUG_EXFAT: logging.debug("GenRawSlotFromName returned:\n%s", hexdump.hexdump(str(self._buf),'return'))
 
         return self._buf
 
@@ -1053,7 +1059,7 @@ class Dirtable(object):
     def create(self, name, prealloc=0):
         "Create a new file chain and the associated slot. Erase pre-existing filename."
         if not exFATDirentry.IsValidDosName(name):
-            raise utils.BadDOSName("Invalid characters in name '%s'" % name)
+            raise exFATException("Invalid characters in name '%s'" % name)
         e = self.open(name)
         if e.IsValid:
             e.IsValid = False
@@ -1063,7 +1069,7 @@ class Dirtable(object):
         self.stream.write(handle.Entry.pack())
         handle.Dir = self
         self._update_dirtable(handle.Entry)
-        logging.debug("Created new file '%s' @%Xh", name, handle.File.start)
+        if DEBUG_EXFAT: logging.debug("Created new file '%s' @%Xh", name, handle.File.start)
         return handle
 
     def mkdir(self, name):
@@ -1093,23 +1099,23 @@ class Dirtable(object):
     def rmtree(self, name=None):
         "Remove a full directory tree"
         if name:
-            logging.debug("rmtree:opening %s", name)
+            if DEBUG_EXFAT: logging.debug("rmtree:opening %s", name)
             target = self.opendir(name)
         else:
             target = self
-            logging.debug("rmtree:using self: %s", target.path)
+            if DEBUG_EXFAT: logging.debug("rmtree:using self: %s", target.path)
         if not target:
-            logging.debug("rmtree:target '%s' not found!", name)
+            if DEBUG_EXFAT: logging.debug("rmtree:target '%s' not found!", name)
             return 0
         for it in target.iterator():
             n = it.Name()
             if it.IsDir():
                 target.opendir(n).rmtree()
-            logging.debug("rmtree:erasing '%s'", n)
+            if DEBUG_EXFAT: logging.debug("rmtree:erasing '%s'", n)
             target.erase(n)
         #~ del target
         if name:
-            logging.debug("rmtree:finally erasing '%s'", name)
+            if DEBUG_EXFAT: logging.debug("rmtree:finally erasing '%s'", name)
             self.erase(name)
         return 1
 
@@ -1243,15 +1249,15 @@ class Dirtable(object):
         else:
             e = self.find(name)
             if not e:
-                logging.debug("Can't find file to rename: '%'s", name)
+                if DEBUG_EXFAT: logging.debug("Can't find file to rename: '%'s", name)
                 return 0
         if self.find(newname):
-            logging.debug("Can't rename, file exists: '%s'", newname)
+            if DEBUG_EXFAT: logging.debug("Can't rename, file exists: '%s'", newname)
             return 0
         # Alloc new slot
         ne = self._alloc(newname)
         if not ne:
-            logging.debug("Can't alloc new file slot for '%s'", newname)
+            if DEBUG_EXFAT: logging.debug("Can't alloc new file slot for '%s'", newname)
             return 0
         # Copy attributes from old to new slot
         for k, v in e._kv.items():
@@ -1263,7 +1269,7 @@ class Dirtable(object):
         # Write new entry
         self.stream.seek(ne.Entry._pos)
         self.stream.write(ne.Entry._buf)
-        logging.debug("'%s' renamed to '%s'", name, newname)
+        if DEBUG_EXFAT: logging.debug("'%s' renamed to '%s'", name, newname)
         self._update_dirtable(ne.Entry)
         self._update_dirtable(e, True)
         # Mark the old one as erased
@@ -1280,11 +1286,11 @@ class Dirtable(object):
         if report_only:
             return (size-pos)/self.boot.cluster
         if not (size-pos)/self.boot.cluster: # if free space is less than a cluster
-            logging.debug("Can't shrink directory table, free space < 1 cluster!")
+            if DEBUG_EXFAT: logging.debug("Can't shrink directory table, free space < 1 cluster!")
             return 0
         self.stream.seek(pos)
         self.stream.trunc()
-        logging.debug("Shrank directory table from %d to %d bytes freeing %d clusters", size, pos, rdiv(size-pos, self.boot.cluster))
+        if DEBUG_EXFAT: logging.debug("Shrank directory table from %d to %d bytes freeing %d clusters", size, pos, rdiv(size-pos, self.boot.cluster))
         return 1
 
     def clean(self, report_only=False):
@@ -1305,7 +1311,7 @@ class Dirtable(object):
         self.lastfreeslot = self.stream.tell()
         unused = pos - self.stream.tell()
         self.stream.write(bytearray(unused)) # blank unused area
-        logging.debug("Cleaned directory table freeing %d slots", unused/32)
+        if DEBUG_EXFAT: logging.debug("Cleaned directory table freeing %d slots", unused/32)
 
     @staticmethod
     def _sortby(a, b):
@@ -1333,7 +1339,7 @@ class Dirtable(object):
         self.lastfreeslot = self.stream.tell()
         unused = pos - self.stream.tell()
         self.stream.write(bytearray(unused)) # blank unused area
-        logging.debug("Sorted directory table freeing %d slots", unused/32)
+        if DEBUG_EXFAT: logging.debug("Sorted directory table freeing %d slots", unused/32)
 
     def listdir(self):
         "Return a list of file and directory names in this directory, sorted by on disk position"
@@ -1401,7 +1407,7 @@ def fat_copy_clusters(boot, fat, start):
         #~ src.bitmap = ...
     target = fat.alloc(count) # possibly defragmented
     dst = Chain(boot, fat, target, boot.cluster*count)
-    logging.debug("Copying %s to %s", src, dst)
+    if DEBUG_EXFAT: logging.debug("Copying %s to %s", src, dst)
     s = 1
     while s:
         s = src.read(boot.cluster)

@@ -1,5 +1,6 @@
-import utils, struct, disk, os, sys, pprint, optparse, mkexfat
+import utils, struct, disk, os, sys, pprint, optparse
 from FAT import *
+from mkexfat import exfat_mkfs
 
 """ FROM https://support.microsoft.com/en-us/kb/140365
 
@@ -52,6 +53,7 @@ def fat12_mkfs(stream, size, sector=512, params={}):
     sectors = size/sector
 
     if sectors < 16 or sectors > 0xFFFFFFFF:
+        print "Fatal: can't apply file system to a %d sectors disk!" % sectors
         return 1
 
     # NOTE: Windows 10 CHKDSK assumes a 2847 clustered floppy even if fat12_mkfs formated a smaller one!!! 
@@ -201,6 +203,7 @@ def fat16_mkfs(stream, size, sector=512, params={}):
     sectors = size/sector
 
     if sectors < 16 or sectors > 0xFFFFFFFF:
+        print "Fatal: can't apply file system to a %d sectors disk!" % sectors
         return 1
 
     # Minimum is 1 (Boot)
@@ -262,8 +265,12 @@ def fat16_mkfs(stream, size, sector=512, params={}):
         if params['wanted_cluster'] in allowed:
             fsinfo = allowed[params['wanted_cluster']]
         else:
-            print "Specified cluster size of %d is not allowed!" % params['wanted_cluster']
-            return -1
+            if 'wanted_fs' in params and params['wanted_fs'] == 'fat16':
+                print "Specified cluster size of %d is not allowed!" % params['wanted_cluster']
+                return -1
+            else:
+                print "Too many %d clusters to apply FAT16: trying FAT32..." % params['wanted_cluster']
+                return fat32_mkfs(stream, size, sector, params)
     else:
         # MS-inspired selection
         if size <= 32<<20:
@@ -362,6 +369,7 @@ def fat32_mkfs(stream, size, sector=512, params={}):
     sectors = size/sector
 
     if sectors > 0xFFFFFFFF: # switch to exFAT where available
+        print "Fatal: can't apply file system to a %d sectors disk!" % sectors
         return -1
 
     # reserved_size auto adjusted according to unallocable space
@@ -388,7 +396,7 @@ def fat32_mkfs(stream, size, sector=512, params={}):
             clusters -= 1
             fat_size = rdiv(4*(clusters+2), sector) * sector
             required_size = cluster_size*clusters + fat_copies*fat_size + reserved_size
-        if clusters < 65526 or clusters > 0x0FFFFFF6: # MS imposed limits
+        if (clusters < 65526 and not params.get('fat32_allows_few_clusters')) or clusters > 0x0FFFFFF6: # MS imposed limits
             continue
         fsinfo['required_size'] = required_size # space occupied by FS
         fsinfo['reserved_size'] = reserved_size # space reserved before FAT#1
@@ -401,9 +409,12 @@ def fat32_mkfs(stream, size, sector=512, params={}):
         if clusters < 65526:
             print "Too few clusters to apply FAT32: trying with FAT16..."
             return fat16_mkfs(stream, size, sector, params)
-        else:
+        if 'wanted_fs' in params and params['wanted_fs'] == 'fat32':
             print "Too many clusters to apply FAT32: aborting."
             return -1
+        else:
+            print "Too many %d clusters to apply FAT32: trying exFAT..." % params['wanted_cluster']
+            return exfat_mkfs(stream, size, sector, params)
 
     #~ print "* MKFS FAT32 INFO: allowed combinations for cluster size:"
     #~ pprint.pprint(allowed)
@@ -411,6 +422,13 @@ def fat32_mkfs(stream, size, sector=512, params={}):
     fsinfo = None
 
     if 'wanted_cluster' in params:
+        if params['wanted_cluster'] > 65536:
+            if 'wanted_fs' in params and params['wanted_fs'] == 'fat32':
+                print "This version of FAT32 can't handle clusters >32K: aborting."
+                return -1
+            else:
+                print "This version of FAT32 can't handle clusters >32K: trying exFAT..."
+                return exfat_mkfs(stream, size, sector, params)
         if params['wanted_cluster'] in allowed:
             fsinfo = allowed[params['wanted_cluster']]
         else:
@@ -533,15 +551,8 @@ if __name__ == '__main__':
         disk_name = args[0]
     dsk = disk.disk(disk_name, 'r+b')
 
-    if dsk.size < 127<<20: # 127M
-        format = fat12_mkfs
-    elif 127<<20 <= dsk.size < 2047<<20: # 2G
-        format = fat16_mkfs
-    elif 2047<<20 <= dsk.size < 126<<30: # 126G, but could be up to 8T w/ 32K cluster
-        format = fat32_mkfs
-    else:
-        format = mkexfat.exfat_mkfs # can be successfully applied to an 1.44M floppy, too!
-    
+    params = {}
+
     if opts.fs_type:
         t = opts.fs_type.lower()
         if t == 'fat12':
@@ -550,14 +561,29 @@ if __name__ == '__main__':
             format = fat16_mkfs
         elif t == 'fat32':
             format = fat32_mkfs
+            params['fat32_allows_few_clusters'] = 1
         elif t == 'exfat':
-            format = mkexfat.exfat_mkfs
+            format = exfat_mkfs
         else:
             print "mkfat error: bad file system specified!"
             par.print_help()
             sys.exit(1)
+        params['wanted_fs'] = t
+    else:
+        if dsk.size < 127<<20: # 127M
+            format = fat12_mkfs
+            t = 'FAT12'
+        elif 127<<20 <= dsk.size < 2047<<20: # 2G
+            format = fat16_mkfs
+            t = 'FAT16'
+        elif 2047<<20 <= dsk.size < 126<<30: # 126G, but could be up to 8T w/ 32K cluster
+            format = fat32_mkfs
+            t = 'FAT32'
+        else:
+            format = exfat_mkfs # can be successfully applied to an 1.44M floppy, too!
+            t = 'exFAT'
+        print "%s file system auto selected..." % t
 
-    params = {}
     if opts.cluster_size:
         t = opts.cluster_size.lower()
         if t[-1] == 'k':
@@ -566,5 +592,9 @@ if __name__ == '__main__':
             params['wanted_cluster'] = int(opts.cluster_size[:-1])<<20
         else:
             params['wanted_cluster'] = int(opts.cluster_size)
+        if params['wanted_cluster'] not in [512<<i for i in range(0,17)]:
+            print "mkfat error: bad cluster size specified!"
+            par.print_help()
+            sys.exit(1)
 
     format(dsk, dsk.size, params=params)

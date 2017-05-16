@@ -13,7 +13,9 @@ BUGS/TODO: (Volume.py)
 
 
 BUGS/TODO: (FAT.py)
-- RLE mapping of assigned clusters, to speed up count_run (and maxrun4len)?
+- introduce Checksum from Win7 or crc32 from zlib in short name generator
+- RLE mapping of assigned clusters as Chain member, to speed up count_run (and maxrun4len)?
+- mark_run for 12-bit? optimized or not?
 - caching with simpler dict {start_sector: [decoded_values]} ?
 - unique handle to directories (to auto-update once on closing) (copy from exFAT?)?
 - check 255 chars limit in nested directories (investigate in exFAT too)
@@ -22,7 +24,6 @@ BUGS/TODO: (FAT.py)
 - open w/ full path like opendir? (exFAT too)
 - must invalidate handle to erased/replaced objects not explicitly closed (really needs auto-updating fields?)?
 - pack & co.: update str += str with list join?
-- 65,534 bytes limit for a folder?
 - update FAT32 FSInfo?
 - parameters {} to tune cluster allocator?
 - guard against seek beyond last valid offset (specially in FixedRoot)

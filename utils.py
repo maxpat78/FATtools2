@@ -1,18 +1,6 @@
 # -*- coding: mbcs -*-
 import struct
 
-class EndOfStream(Exception):
-	pass
-
-class BadRecord(Exception):
-	pass
-
-class BadIndex(Exception):
-	pass
-
-class BadDOSName(Exception):
-	pass
-
 def class2str(c, s):
 	"Enumera in tabella nomi e valori dal layout di una classe"
 	keys = c._kv.keys()
