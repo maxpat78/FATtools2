@@ -1095,14 +1095,14 @@ class FATDirentry(Direntry):
     @staticmethod
     def GenRawShortFromLongName(name, id=1):
         "Generate a DOS 8+3 short name from a long one (Windows 95 style)"
-        name, ext = os.path.splitext(name)
         # Replaces valid LFN chars prohibited in short name
         nname = name.replace(' ', '')
         for c in '[]+.,;=':
             nname = nname.replace(c, '_')
+        nname, ext = os.path.splitext(nname)
         # If no replacement and name is short (LIBs -> LIBS)
-        if len(name) < 9 and name == nname:
-            return (name + ext[1:4]).upper()
+        if len(nname) < 9 and nname in name and ext in name:
+            return (nname + ext[1:4]).upper()
         # Windows 9x: ~1 ... ~9999... as needed
         tilde = '~%d' % id
         i = 8 - len(tilde)
