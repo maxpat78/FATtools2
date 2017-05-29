@@ -424,10 +424,10 @@ def fat32_mkfs(stream, size, sector=512, params={}):
     if 'wanted_cluster' in params:
         if params['wanted_cluster'] > 65536:
             if 'wanted_fs' in params and params['wanted_fs'] == 'fat32':
-                print "This version of FAT32 can't handle clusters >32K: aborting."
+                print "This version of FAT32 doesn't handle clusters >64K: aborting."
                 return -1
             else:
-                print "This version of FAT32 can't handle clusters >32K: trying exFAT..."
+                print "This version of FAT32 doesn't handle clusters >64K: trying exFAT..."
                 return exfat_mkfs(stream, size, sector, params)
         if params['wanted_cluster'] in allowed:
             fsinfo = allowed[params['wanted_cluster']]

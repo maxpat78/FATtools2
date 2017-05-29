@@ -13,24 +13,23 @@ BUGS/TODO: (Volume.py)
 
 
 BUGS/TODO: (FAT.py)
-- introduce Checksum from Win7 or crc32 from zlib in short name generator
-- RLE mapping of assigned clusters as Chain member, to speed up count_run (and maxrun4len)?
-- mark_run for 12-bit? optimized or not?
+- ensure Dirtable cache is updated when an entry is altered (i.e. when erasing) (exFAT too)
+- Handle: update Dirtable cache when altering sizes/times (write, ftruncate, seek past end)?
+- Dirtable.iterator: provide a way to optionally iterate on (already) cached entries w/o accessing to disk again?
+- Chain size: since a chain can legally have clusters allocated but not assigned to disk contents (i.o.w. real file size < allocated chain size), effective chain length SHOULD be tested always at first access, not relying upon passed file size!
+- strategies in RLE map compactors: sort by reversed size or offset
 - caching with simpler dict {start_sector: [decoded_values]} ?
 - unique handle to directories (to auto-update once on closing) (copy from exFAT?)?
-- check 255 chars limit in nested directories (investigate in exFAT too)
 - merge create in open with modes? (exFAT too)
-- stat in dirtable? (exFAT too)
 - open w/ full path like opendir? (exFAT too)
-- must invalidate handle to erased/replaced objects not explicitly closed (really needs auto-updating fields?)?
 - pack & co.: update str += str with list join?
 - update FAT32 FSInfo?
 - parameters {} to tune cluster allocator?
-- guard against seek beyond last valid offset (specially in FixedRoot)
 - generalize pack() in utils.py
 
 
 BUGS/TODO: (exFAT.py)
+- verify limits in names (255) and pathnames (260)
 - implement frags, clean & co.
 - mkdirs?
 - merge exFAT w/ FAT Chain (write) // 31.8.16 bug in FAT alloc prevented this?
