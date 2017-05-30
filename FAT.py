@@ -682,6 +682,8 @@ class Chain(object):
             self.start, self.end = self._alloc(clusters)
             self.size = clusters * self.boot.cluster
             if DEBUG_FAT: logging.debug("Chain.seek:allocated %d clusters from #%Xh seeking %X", clusters, self.start, self.pos)
+        # file size is the top pos reached during seek
+        self.filesize = max(self.filesize, self.pos)
         self.vcn = self.pos / self.boot.cluster # n-th cluster chain
         self.vco = self.pos % self.boot.cluster # offset in it
         self.realseek()
@@ -784,8 +786,8 @@ class Chain(object):
             self.pos += n
             i += n
             if DEBUG_FAT: logging.debug("written s[%d:%d] for %d contiguous bytes (todo=%d)", i-n, i, n, len(s)-i)
-        # file size is the top pos reached during write
-        self.filesize = max(self.filesize, self.pos)
+        #~ # file size is the top pos reached during write
+        #~ self.filesize = max(self.filesize, self.pos)
         self.seek(self.pos)
         # Windows FS zeroes the last written sector only, not the full cluster remainder
         # When allocating a directory table, it is strictly necessary that only the first byte in
@@ -977,6 +979,7 @@ class Handle(object):
                 return
 
             self.Entry.dwFileSize = self.File.filesize
+
             # 25.05.17: an empty file can legally keep clusters allocated for future needs! 
             # Free cluster allocated if empty at last
             #~ if not self.Entry.dwFileSize and self.Entry.Start():
