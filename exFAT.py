@@ -184,8 +184,6 @@ class Chain(object):
             self.start, self.nofat = self.boot.bitmap.alloc(clusters)
             self.size = clusters * self.boot.cluster
             if DEBUG_EXFAT: logging.debug("Chain%08X: allocated %d clusters from 0x%X seeking 0x%X", self.start, clusters, self.start, self.pos)
-        # file size is the top pos reached
-        self.filesize = max(self.filesize, self.pos)
         self.vcn = self.pos / self.boot.cluster # n-th cluster chain
         self.vco = self.pos % self.boot.cluster # offset in it
         self.realseek()
@@ -309,8 +307,8 @@ class Chain(object):
             self.pos += n
             i += n
             if DEBUG_EXFAT: logging.debug("Chain%08X: written s[%d:%d] for %d contiguous bytes (todo=%d)", self.start, i-n, i, n, len(s)-i)
-        #~ # file size is the top pos reached during write
-        #~ self.filesize = max(self.filesize, self.pos)
+        # file size is the top pos reached during write
+        self.filesize = max(self.filesize, self.pos)
         self.seek(self.pos)
         if new_allocated:
             if self.pos < self.size:
@@ -543,7 +541,7 @@ class Bitmap(Chain):
             raise exFATException("FATAL! Free clusters exhausted, couldn't allocate %d more!" % count)
         if DEBUG_EXFAT: logging.debug("ok to search, %d clusters free", self.free_clusters)
 
-        #~ self.free_clusters -= count
+        self.free_clusters -= count
 
         last = start
         is_contiguous = False # tell if the full set of clusters, previously and actually allocates, is not fragmented
@@ -555,6 +553,11 @@ class Bitmap(Chain):
             if DEBUG_EXFAT: logging.debug("alloc: searching %d cluster(s) from 0x%X", count, self.last_free_alloc)
             # i=run start, n=clusters found
             i, n = self.findfree(self.last_free_alloc, count)
+            if i < 0 and self.last_free_alloc > 2:
+                if DEBUG_EXFAT: logging.debug("alloc: restarting search from cluster 0x2")
+                self.last_free_alloc = 2 # retry search
+                i, n = self.findfree(self.last_free_alloc, count)
+            if i < 0: break # no more free clusters
             # Record first allocated cluster
             if first_allocated < 0: first_allocated = i
             tot_allocated += n
@@ -587,6 +590,15 @@ class Bitmap(Chain):
 
         self.last_free_alloc = last
 
+        # If we can't allocate all required clusters...
+        if count:
+            #...free all the clusters we allocated
+            if DEBUG_EXFAT: logging.debug("FATAL: couldn't allocate %d more clusters", count)
+            if is_contiguous:
+                self.set(first_allocated, tot_allocated, True)
+            else:
+                self.free(first_allocated)
+            return 0
         if DEBUG_EXFAT: logging.debug("clusters successfully allocated from 0x%X%s", first, ('',' in a contiguous run')[is_contiguous])
         return first, is_contiguous
 
