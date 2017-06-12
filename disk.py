@@ -1,14 +1,18 @@
 # -*- coding: mbcs -*-
 import os, sys, atexit
-import logging
 from ctypes import *
+from debug import log
 #~ import hexdump
 
-DEBUG_DISK = 0
+DEBUG = 0
+
 
 class win32_disk(object):
 	"Handles a Win32 disk"
 	open_handles = {}
+
+	def __str__ (self):
+		return "Win32 Disk Handle %Xh for %s, mode '%s'" % (self.handle, self.name, self.mode)
 
 	def __init__(self, name, mode='rb', buffering=0):
 		status = c_int(0)
@@ -44,14 +48,25 @@ class win32_disk(object):
 		self.name = name
 		self.mode = mode
 		self.buf = create_string_buffer(4096)
-		if DEBUG_DISK: logging.debug("Successfully opened HANDLE to Win32 Disk %s (size %d MB) for exclusive access", name, self.size/(1<<20))
-
+		if DEBUG&1: log("Successfully opened HANDLE to Win32 Disk %s (size %d MB) for exclusive access", name, self.size/(1<<20))
+		self._pos = 0
+		
 	def seek(self, offset, whence=0):
+		if whence == 0:
+			npos = offset
+		elif whence == 1:
+			npos = self._pos + offset
+		else:
+			npos = self._pos - offset
+		if self._pos == npos:
+			if DEBUG&1: log("note: call to SetFilePointer superseded, offset is still %Xh", npos)
+			return
 		n = c_int(offset>>32)
 		if 0xFFFFFFFF == windll.kernel32.SetFilePointer(self.handle, offset&0xFFFFFFFF, byref(n), whence):
 			if windll.kernel32.GetLastError() != 0:
 				print "seek failed with error", windll.kernel32.GetLastError()
 				sys.exit(1)
+		self._pos = npos
 
 	def tell(self):
 		n = c_int(0)
@@ -73,6 +88,7 @@ class win32_disk(object):
 			print "readinto failed with error %d" % windll.kernel32.GetLastError()
 			sys.exit(1)
 		buf[0:len(buf)] = s.raw[0:len(buf)] # is there a more direct method???
+		self._pos += n.value
 
 	def read(self, size=-1):
 		assert size != -1
@@ -84,6 +100,7 @@ class win32_disk(object):
 		if not windll.kernel32.ReadFile(self.handle, buf, size, byref(n), 0):
 			print "read(%d) failed with error %d" % (size, windll.kernel32.GetLastError())
 			sys.exit(1)
+		self._pos += n.value
 		return buf
 
 	def write(self, s):
@@ -99,6 +116,7 @@ class win32_disk(object):
 		if not windll.kernel32.WriteFile(self.handle, s, len(s), 0, 0):
 			print "write() failed with error", windll.kernel32.GetLastError()
 			sys.exit(1)
+		self._pos += len(s)
 
 
 
@@ -108,7 +126,11 @@ class disk(object):
 	2) seek from disk's end does not work; 3) seek past disk's end followed by a read
 	returns no error."""
 
+	def __str__ (self):
+		return "Python disk '%s' (mode '%s') @%016Xh" % (self._file.name, self.mode, self.pos)
+
 	def __init__(self, name, mode='rb', buffering=0):
+		self.mode = mode
 		self.pos = 0 # linear pos in the virtual stream
 		self.si = 0 # disk sector index
 		self.so = 0 # sector offset
@@ -145,21 +167,24 @@ class disk(object):
 			self.pos = offset
 		self.si = self.pos / self.blocksize
 		self.so = self.pos % self.blocksize
-		if DEBUG_DISK: logging.debug("disk pointer to set @%Xh", self.si*self.blocksize)
+		#~ if self.si == self.lastsi:
+			#~ if DEBUG&1: log("si == lastsi == %Xh, not seeking!", self.si)
+			#~ return
+		if DEBUG&1: log("disk pointer to set @%Xh", self.si*self.blocksize)
 		self._file.seek(self.si*self.blocksize)
-		if DEBUG_DISK: logging.debug("si=%Xh lastsi=%Xh so=%Xh", self.si,self.lastsi,self.so)
+		if DEBUG&1: log("si=%Xh lastsi=%Xh so=%Xh", self.si,self.lastsi,self.so)
 
 	def tell(self):
 		return self.pos
 
 	def cache_stats(self):
-		if DEBUG_DISK: logging.debug("Cache items/hits/misses: %d/%d/%d", len(self.cache_table), self.cache_hits, self.cache_misses)
+		if DEBUG&1: log("Cache items/hits/misses: %d/%d/%d", len(self.cache_table), self.cache_hits, self.cache_misses)
 
 	def cache_flush(self, sector=None):
 		self.cache_stats()
 		if not self.cache_dirties:
 			# 21.04.17: must ANYWAY reset (read-only) cache, or higher cached slots could get silently overwritten!
-			if DEBUG_DISK: logging.debug("resetting cache (no dirty sectors)")
+			if DEBUG&1: log("resetting cache (no dirty sectors)")
 			self.cache_table = {}
 			self.cache_tableR = {}
 			return
@@ -168,20 +193,20 @@ class disk(object):
 			i = self.cache_table[sector]
 			self._file.write(self.cache[i:i+self.blocksize])
 			del self.cache_dirties[sector]
-			if DEBUG_DISK: logging.debug("%s: dirty sector #%d committed to disk from cache[%d]", self, sector,i/512)
+			if DEBUG&1: log("%s: dirty sector #%d committed to disk from cache[%d]", self, sector,i/512)
 			return
-		if DEBUG_DISK: logging.debug("%s: committing %d dirty sectors to disk", self, len(self.cache_dirties))
+		if DEBUG&1: log("%s: committing %d dirty sectors to disk", self, len(self.cache_dirties))
 		for sec in sorted(self.cache_dirties):
 			self._file.seek(sec*self.blocksize)
 			try:
 				i = self.cache_table[sec]
 				self._file.write(self.cache[i:i+self.blocksize])
 			except:
-				if DEBUG_DISK: logging.debug("ERROR! Sector %d in cache_dirties not in cache_table!", sec)
+				if DEBUG&1: log("ERROR! Sector %d in cache_dirties not in cache_table!", sec)
 				if sec in self.cache_tableR.values():
-					if DEBUG_DISK: logging.debug("(but sector %d is in cache_tableR)", sec)
+					if DEBUG&1: log("(but sector %d is in cache_tableR)", sec)
 				else:
-					if DEBUG_DISK: logging.debug("(and sector %d is neither in cache_tableR)", sec)
+					if DEBUG&1: log("(and sector %d is neither in cache_tableR)", sec)
 				continue
 		self.cache_dirties = {}
 		self.cache_table = {}
@@ -193,26 +218,26 @@ class disk(object):
 		if self.asize ==self.blocksize:
 			if self.si not in self.cache_table:
 				self.cache_misses += 1
-				if DEBUG_DISK: logging.debug("%s: cache_retrieve missed #%d", self, self.si)
+				if DEBUG&1: log("%s: cache_retrieve missed #%d", self, self.si)
 				return False
 			self.cache_hits += 1
 			i = self.cache_table[self.si]
 			self.buf = self.cache[i:i+self.asize]
-			if DEBUG_DISK: logging.debug("%s: cache_retrieve hit #%d", self, self.si)
+			if DEBUG&1: log("%s: cache_retrieve hit #%d", self, self.si)
 			return True
 
 		# If we are retrieving multiple blocks...
 		for i in range(self.asize/self.blocksize):
 			# If one block is not cached...
 			if self.si+i not in self.cache_table:
-				if DEBUG_DISK: logging.debug("%s: cache_retrieve (multisector) miss-not cached %d", self, self.si+i)
+				if DEBUG&1: log("%s: cache_retrieve (multisector) miss-not cached %d", self, self.si+i)
 				self.cache_misses += 1
 				continue
 			# If one block is dirty, first flush it...
 			if self.si+i in self.cache_dirties:
-				if DEBUG_DISK: logging.debug("%s: cache_retrieve (multisector) flush %d", self, self.si+i)
+				if DEBUG&1: log("%s: cache_retrieve (multisector) flush %d", self, self.si+i)
 				self.cache_flush(self.si+i)
-				if DEBUG_DISK: logging.debug("%s: seeking back @%Xh after flush", self, self.pos)
+				if DEBUG&1: log("%s: seeking back @%Xh after flush", self, self.pos)
 				self.seek(self.pos)
 				continue
 		return False # consider a miss
@@ -225,12 +250,12 @@ class disk(object):
 			self.cache_index = 0
 			self.seek(self.pos)
 		pos = self.cache_index
-		#~ logging.debug("loading disk sector #%d into cache[%d] from offset %Xh", self.si, pos/512, self._file.tell())
-		if DEBUG_DISK: logging.debug("loading disk sector #%d into cache[%d]", self.si, pos/512)
+		#~ log("loading disk sector #%d into cache[%d] from offset %Xh", self.si, pos/512, self._file.tell())
+		if DEBUG&1: log("loading disk sector #%d into cache[%d]", self.si, pos/512)
 		self._file.readinto(self.cache[pos:pos+self.asize])
 		self.buf = self.cache[pos:pos+self.asize]
 		#~ if self.si == 50900:
-			#~ logging.debug("Loaded sector #50900:\n%s", hexdump.hexdump(self.cache[pos:pos+self.asize],'return'))
+			#~ log("Loaded sector #50900:\n%s", hexdump.hexdump(self.cache[pos:pos+self.asize],'return'))
 		self.cache_index += self.asize
 		# Update dictionary of cached sectors and their position
 		# Invalidate accordingly if we are recycling pool from zero?
@@ -245,7 +270,7 @@ class disk(object):
 		return pos
 
 	def read(self, size=-1):
-		if DEBUG_DISK: logging.debug("read(%d) bytes @%Xh", size, self.pos)
+		if DEBUG&1: log("read(%d) bytes @%Xh", size, self.pos)
 		self.seek(self.pos)
 		# If size is negative
 		if size < 0:
@@ -260,7 +285,7 @@ class disk(object):
 		self.asize = (se - self.si) * self.blocksize # full sectors to read in
 		# If sectors are already cached...
 		if self.cache_retrieve():
-			if DEBUG_DISK: logging.debug("%d bytes read from cache", self.asize)
+			if DEBUG&1: log("%d bytes read from cache", self.asize)
 			self.lastsi = self.si
 			self.pos += size
 			return self.buf[self.so : self.so+size]
@@ -269,7 +294,7 @@ class disk(object):
 		if self.asize > self.blocksize:
 			self.buf = bytearray(self.asize)
 			self._file.seek(self.si*self.blocksize)
-			if DEBUG_DISK: logging.debug("reading %d bytes directly from disk @%Xh", self.asize, self._file.tell())
+			if DEBUG&1: log("reading %d bytes directly from disk @%Xh", self.asize, self._file.tell())
 			self._file.readinto(self.buf)
 			# Direct read (bypass) DON'T advance lastsi? Or file pointer?
 			self.si += self.asize/self.blocksize # 11.01.2016: fix mkexfat flaw
@@ -283,45 +308,45 @@ class disk(object):
 		return self.buf[self.so : self.so+size]
 
 	def write(self, s): # s MUST be of type bytearray/memoryview
-		if DEBUG_DISK: logging.debug("request to write %d bytes @%Xh", len(s), self.pos)
+		if DEBUG&1: log("request to write %d bytes @%Xh", len(s), self.pos)
 		if len(s) == 0: return
 		# If we have to complete a sector...
 		if self.so:
 			j = min(self.blocksize - self.so, len(s))
-			if DEBUG_DISK: logging.debug("writing middle sector %d[%d:%d]", self.si, self.so, self.so+j)
+			if DEBUG&1: log("writing middle sector %d[%d:%d]", self.si, self.so, self.so+j)
 			self.asize = 512
 			if not self.cache_retrieve():
 				self.cache_readinto()
 			# We assume buf is pointing to rawcache
 			self.buf[self.so : self.so+j] = s[:j]
 			s = s[j:] # slicing penalty if buffer?
-			if DEBUG_DISK: logging.debug("len(s) is now %d", len(s))
+			if DEBUG&1: log("len(s) is now %d", len(s))
 			self.cache_dirties[self.si] = True
 			self.pos += j
 			self.seek(self.pos)
 		# if we have full sectors to write...
 		if len(s) > self.blocksize:
 			full_blocks = len(s)/512
-			if DEBUG_DISK: logging.debug("writing %d sector(s) directly to disk", full_blocks)
+			if DEBUG&1: log("writing %d sector(s) directly to disk", full_blocks)
 			# Directly write full sectors to disk
 			#~ self._file.seek(self.si*self.blocksize)
 			# Invalidate eventually cached data
 			for si in xrange(self.si, self.si+full_blocks):
 				if si in self.cache_table:
-					if DEBUG_DISK: logging.debug("removing sector #%d from cache", si)
+					if DEBUG&1: log("removing sector #%d from cache", si)
 					Ri = self.cache_table[si]
 					del self.cache_tableR[Ri]
 					del self.cache_table[si]
 					if si in self.cache_dirties:
-						if DEBUG_DISK: logging.debug("removing sector #%d from dirty sectors", si)
+						if DEBUG&1: log("removing sector #%d from dirty sectors", si)
 						del self.cache_dirties[si]
 			self._file.write(s[:full_blocks*512])
 			self.pos += full_blocks*512
 			self.seek(self.pos)
 			s = s[full_blocks*512:] # slicing penalty if buffer?
-			if DEBUG_DISK: logging.debug("len(s) is now %d", len(s))
+			if DEBUG&1: log("len(s) is now %d", len(s))
 		if len(s):
-			if DEBUG_DISK: logging.debug("writing sector %d[%d:%d] from start", self.si, self.so, self.so+len(s))
+			if DEBUG&1: log("writing sector %d[%d:%d] from start", self.si, self.so, self.so+len(s))
 			self.asize = 512
 			if not self.cache_retrieve():
 				self.cache_readinto()

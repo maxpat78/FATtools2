@@ -2,18 +2,19 @@
 # Utilities to manage an exFAT  file system
 #
 
-DEBUG_EXFAT=0
+DEBUG=0
 
 import copy, os, struct, time, cStringIO, atexit
 from datetime import datetime
 from collections import OrderedDict
+from debug import log
 
 import utils
-from FAT import FAT
+from FAT import FAT, Chain
 
-if DEBUG_EXFAT:
+if DEBUG&8:
     import hexdump
-    import logging
+
 
 
 class exFATException(Exception):
@@ -96,7 +97,7 @@ class boot_exfat(object):
 
     @staticmethod
     def GetChecksum(s, UpCase=False):
-        "Computate the checksum for the VBR sectors (the first 11) or the UpCase table"
+        "Computates the checksum for the VBR sectors (the first 11) or the UpCase table"
         hash = 0
         for i in xrange(len(s)):
             if not UpCase and i in (106, 107, 112): continue
@@ -131,238 +132,10 @@ def upcase_expand(s):
 
 
 
-class Chain(object):
-    "Open a cluster chain like a plain file"
-    def __init__ (self, boot, fat, cluster, size=0, nofat=0):
-        self.stream = boot.stream
-        self.boot = boot
-        self.fat = fat
-        self.start = cluster # start cluster or zero if empty
-        self.nofat = nofat # does not use FAT (=contig)
-        # Size in bytes of allocated cluster(s)
-        if self.start and not nofat:
-            self.size = fat.count(cluster)[0]*boot.cluster
-        else:
-            self.size = rdiv(size, boot.cluster)*boot.cluster
-        self.filesize = size or self.size # file size, if available, or chain size
-        self.pos = 0 # virtual stream linear pos
-        # Virtual Cluster Number (cluster index in this chain)
-        self.vcn = -1
-        # Virtual Cluster Offset (current offset in VCN)
-        self.vco = -1
-        self.lastvlcn = (0, cluster) # last cluster VCN & LCN
-        if DEBUG_EXFAT: logging.debug("Cluster chain of %d%sbytes (%d bytes) @%Xh", self.filesize, (' ', ' contiguous ')[nofat], self.size, cluster)
-
-    def __str__ (self):
-        return "Chain of %d (%d) bytes from #%Xh" % (self.filesize, self.size, self.start)
-
-    def maxrun4len(self, length):
-        n = rdiv(length, self.boot.cluster)
-        count, next = self.fat.count_run(self.lastvlcn[1], n)
-        maxchunk = count * self.boot.cluster
-        if DEBUG_EXFAT: logging.debug("maxrun4len: run of %d bytes (%d clusters) from VCN #%d (first,next LCN=%Xh,%Xh)", maxchunk, n, self.lastvlcn[0], self.lastvlcn[1], next)
-        # Update (Last VCN, Next LCN) for fragment
-        self.lastvlcn = (self.lastvlcn[0]+n, next)
-        return maxchunk
-
-    def tell(self): return self.pos
-
-    def realtell(self):
-        return self.boot.cl2offset(self.lastvlcn[1])+self.vco
-
-    def seek(self, offset, whence=0):
-        if whence == 1:
-            self.pos += offset
-        elif whence == 2:
-            if self.size:
-                self.pos = self.size - offset
-        else:
-            self.pos = offset
-        # if emtpy chain, allocate some clusters
-        if self.pos and not self.size:
-            clusters = rdiv(self.pos, self.boot.cluster)
-            self.start, self.nofat = self.boot.bitmap.alloc(clusters)
-            self.size = clusters * self.boot.cluster
-            if DEBUG_EXFAT: logging.debug("Chain%08X: allocated %d clusters from 0x%X seeking 0x%X", self.start, clusters, self.start, self.pos)
-        self.vcn = self.pos / self.boot.cluster # n-th cluster chain
-        self.vco = self.pos % self.boot.cluster # offset in it
-        self.realseek()
-
-    def realseek(self):
-        if DEBUG_EXFAT: logging.debug("Chain%08X: realseek with VCN=%d VCO=%d", self.start, self.vcn,self.vco)
-        if self.size and self.pos >= self.size:
-            if DEBUG_EXFAT: logging.debug("Chain%08X: detected chain end at VCN %d while seeking", self.start, self.vcn)
-            self.vcn = -1
-            return
-        if self.nofat:
-            cluster = self.start + self.vcn
-            if cluster > self.start + self.size/self.boot.cluster:
-                self.vcn = -1
-        else:
-            # If we've reached a preceding and nearer cluster already...
-            if self.lastvlcn[0] < self.vcn:
-                si = self.lastvlcn[0]
-                cluster = self.lastvlcn[1]
-            else:
-                si = 0
-                cluster = self.start
-            for i in xrange(si, self.vcn):
-                cluster = self.fat[cluster]
-                #~ if not self.fat.isvalid(cluster):
-                if not ((cluster >= 2 and cluster <= self.fat.real_last) or \
-                (self.fat.last <= cluster <= self.fat.last+7) or \
-                cluster == self.fat.bad):
-                    raise exFATException("%s: end of stream reached while seeking!"%self)
-            self.lastvlcn = (self.vcn, cluster)
-            #~ if self.fat.islast(cluster):
-            if (self.fat.last <= cluster <= self.fat.last+7):
-                self.vcn = -1
-        if DEBUG_EXFAT: logging.debug("Chain%08X: realseek seeking VCN=%d LCN=%Xh [%Xh:] @%Xh", self.start, self.vcn, cluster, self.vco, self.boot.cl2offset(cluster))
-        self.stream.seek(self.boot.cl2offset(cluster)+self.vco)
-
-    def read(self, size=-1):
-        if DEBUG_EXFAT: logging.debug("Chain%08X: read(%d) called from offset 0x%X", self.start, size, self.pos)
-        self.seek(self.pos)
-        # If negative size, set it to file size
-        if size < 0:
-            size = self.filesize
-        # If requested size is greater than file size, limit to the latter
-        if self.pos + size > self.filesize:
-            size = self.filesize - self.pos
-            if size < 0: size = 0
-        buf = bytearray()
-        if self.nofat: # contiguous clusters
-            if not size or self.vcn == -1:
-                return buf
-            buf += self.stream.read(size)
-            self.pos += size
-            if DEBUG_EXFAT: logging.debug("Chain%08X: read %d contiguous bytes, VCN=0x%X[0x%X:]", self.start, len(buf), self.vcn, self.vco)
-            return buf
-        while 1:
-            if not size or self.vcn == -1:
-                break
-            n = min(size, self.maxrun4len(size))
-            buf += self.stream.read(n)
-            size -= n
-            self.pos += n
-            self.seek(self.pos)
-        if DEBUG_EXFAT: logging.debug("Chain%08X: read %d byte, VCN=0x%X[0x%X:]", self.start, len(buf), self.vcn, self.vco)
-        return buf
-
-    def write(self, s):
-        self.seek(self.pos)
-        if DEBUG_EXFAT: logging.debug("Chain%08X: write(buf[:%d]) called from offset 0x%X, VCN=0x%X[0x%X:]", self.start, len(s), self.pos, self.vcn, self.vco)
-        new_allocated = 0
-        if self.pos + len(s) > self.size:
-            # Alloc more clusters from actual last one
-            # reqb=requested bytes, reqc=requested clusters, lastc=last cluster in the chain
-            reqb = self.pos + len(s) - self.size
-            reqc = rdiv(reqb, self.boot.cluster)
-            if DEBUG_EXFAT: logging.debug("pos=%X(%d), len=%d, size=%d(%Xh)", self.pos, self.pos, len(s), self.size, self.size)
-            if DEBUG_EXFAT: logging.debug("needed %d bytes [%d cluster(s)] more to write", reqb, reqc)
-            if self.start:
-                if self.nofat:
-                    lastc = self.start + self.size/self.boot.cluster - 1
-                else:
-                    lastc = self.fat.count(self.start)[1]
-                # first=lastc since we continue the chain
-                start, nofat = self.boot.bitmap.alloc(reqc, lastc, lastc, self.nofat)
-                self.size += reqc*self.boot.cluster
-                # if blocks are now fragmented, set the FAT for the
-                # original clusters
-                if self.nofat and not nofat:
-                    if DEBUG_EXFAT: logging.debug("Chain%08X: chain got fragmented, setting FAT from 0x%X to 0x%X", self.start, self.start, lastc)
-                    self.nofat = 0
-                    for i in xrange(self.start, lastc):
-                        self.fat[i] = i+1
-                #~ self.lastvlcn = (self.size/self.bootcluster, ???) # update last cluster VCN & LCN
-                # force lastvlcn update
-                pos = self.pos
-                self.seek(0)
-                self.seek(pos)
-            else:
-                # if chain is empty, again, simply allocate the clusters...
-                self.start, self.nofat = self.boot.bitmap.alloc(reqc)
-                # ...and force a seek on the real medium
-                self.size = reqc*self.boot.cluster
-                self.seek(self.pos)
-            new_allocated = 1
-        i = 0
-        btoe = self.boot.cluster - self.vco # bytes to cluster's end
-        if len(s) > btoe:
-            if DEBUG_EXFAT: logging.debug("Chain%08X: writing %d bytes to end of cluster", self.start, btoe)
-            self.seek(self.pos)
-            self.stream.write(s[:btoe])
-            self.pos += btoe
-            i += btoe
-        while i < len(s):
-            self.seek(self.pos)
-            if self.nofat:
-                # write all bytes, since space is contiguous
-                n = len(s)-i
-            else:
-                # write minimum between s rest and maximum contig run
-                n = min(len(s)-i, self.maxrun4len(len(s)-i))
-            self.stream.write(s[i:i+n])
-            self.pos += n
-            i += n
-            if DEBUG_EXFAT: logging.debug("Chain%08X: written s[%d:%d] for %d contiguous bytes (todo=%d)", self.start, i-n, i, n, len(s)-i)
-        # file size is the top pos reached during write
-        self.filesize = max(self.filesize, self.pos)
-        self.seek(self.pos)
-        if new_allocated:
-            if self.pos < self.size:
-                if DEBUG_EXFAT: logging.debug("Chain%08X: blanking newly allocated cluster tip, %d bytes @0x%X", self.start, self.size-self.pos, self.pos)
-                self.stream.write(bytearray(self.size - self.pos))
-
-    def trunc(self):
-        "Truncate the chain to actual offset, freeing subsequent clusters accordingly"
-        if DEBUG_EXFAT: logging.debug("called trunc() on %s @%d", self, self.pos)
-        n = self.size/self.boot.cluster # number of clusters
-        nf = (self.size-self.pos)/self.boot.cluster # number of clusters to free
-        if n == 1 or not nf: return 0
-        end = self.pos/self.boot.cluster # new last cluster
-        if self.nofat:
-            st = self.start+1
-        else:
-            st = self.fat.count_to(self.start, end)
-        if DEBUG_EXFAT: logging.debug("Truncating %s to %d by %d clusters (#%Xh new last cluster)", self, self.pos, nf, st)
-        if self.nofat:
-            # Simply mark the free clusters
-            self.boot.bitmap.set(st, nf, True)
-            if self.boot.bitmap.free_clusters != None:
-                self.boot.bitmap.free_clusters += nf
-        else:
-            # Free the chain from next to last
-            self.boot.bitmap.free(self.fat[st])
-            # Set new last cluster
-            self.fat[st] = self.fat.last
-        # Update chain and virtual stream sizes
-        self.size -= nf*self.boot.cluster
-        self.filesize = self.pos
-        return 1
-
-    def frags(self):
-        if DEBUG_EXFAT: logging.debug("Fragmentation of %s", self)
-        if self.nofat:
-            if DEBUG_EXFAT: logging.debug("File is %d contig clusters from %Xh", rdiv(self.size, self.boot.cluster), self.start)
-            return 0
-        runs = 0
-        start = self.start
-        while 1:
-            length, next = self.fat.count_run(start)
-            if next == start: break
-            runs += 1
-            if DEBUG_EXFAT: logging.debug("Run of %d clusters from %Xh (next=%Xh)", length, start, next)
-            start = next
-        if DEBUG_EXFAT: logging.debug("Detected %d fragments for %d clusters", runs, self.size/self.boot.cluster)
-        if DEBUG_EXFAT: logging.debug("Fragmentation is %f", float(runs-1) / float(self.size/self.boot.cluster))
-        return runs
-
-
-
 class Bitmap(Chain):
     def __init__ (self, boot, fat, cluster, size=0):
+        self.isdirectory=False
+        self.runs = OrderedDict() # RLE map of fragments
         self.stream = boot.stream
         self.boot = boot
         self.fat = fat
@@ -378,19 +151,21 @@ class Bitmap(Chain):
         self.vco = -1
         self.lastvlcn = (0, cluster) # last cluster VCN & LCN
         self.last_free_alloc = 2
+        self.nofat = False
         # Bitmap always uses FAT, even if contig, but is fixed size
-        self.nofat = self.size == self.maxrun4len(self.size)
+        self.size == self.maxrun4len(self.size)
         self.free_clusters = None # tracks free clusters number
         self.free_clusters_map = None
+        self.free_clusters_flag = 0 # set if map needs compacting
         self.map_free_space()
-        if DEBUG_EXFAT: logging.debug("exFAT Bitmap of %d bytes (%d clusters) @%Xh", self.filesize, self.filesize*8, self.start)
+        if DEBUG&8: log("exFAT Bitmap of %d bytes (%d clusters) @%Xh", self.filesize, self.filesize*8, self.start)
 
     def __str__ (self):
         return "exFAT Bitmap of %d bytes (%d clusters) @%Xh" % (self.filesize, self.filesize*8, self.start)
 
     def map_free_space(self):
         "Maps the free clusters in an ordered dictionary {start_cluster: run_length}"
-        self.free_clusters_map = OrderedDict()
+        self.free_clusters_map = {}
         FREE_CLUSTERS=0
         # Bitmap could reach 512M!
         PAGE = 1<<20
@@ -399,7 +174,7 @@ class Bitmap(Chain):
         self.seek(i)
         while i < END_OF_CLUSTERS:
             s = self.read(min(PAGE, END_OF_CLUSTERS-i)) # slurp full bitmap, or 1M page
-            if DEBUG_EXFAT: logging.debug("map_free_space: loaded Bitmap page of %d bytes @0x%X", len(s), i)
+            if DEBUG&8: log("map_free_space: loaded Bitmap page of %d bytes @0x%X", len(s), i)
             j=0
             while j < len(s)*8:
                 first_free = -1
@@ -420,28 +195,44 @@ class Bitmap(Chain):
                     j+=1
                 if first_free < 0: continue
                 FREE_CLUSTERS+=run_length
-                if self.free_clusters_map:
-                    ff, rl = self.free_clusters_map.popitem()
-                    if ff+rl == first_free:
-                        if DEBUG_EXFAT: logging.debug("map_free_space: merging run (%d, %d) with previous one", first_free, run_length)
-                        first_free = ff
-                        run_length = rl+run_length
-                    else:
-                        self.free_clusters_map[ff] =  rl # push back item
                 self.free_clusters_map[first_free] =  run_length
-                if DEBUG_EXFAT: logging.debug("map_free_space: appended run (%d, %d)", first_free, run_length)
+                if DEBUG&8: log("map_free_space: appended run (%d, %d)", first_free, run_length)
             i += len(s) # advance to next Bitmap page to examine
         self.free_clusters = FREE_CLUSTERS
-        if DEBUG_EXFAT: logging.debug("map_free_space: %d clusters free in %d runs", FREE_CLUSTERS, len(self.free_clusters_map))
+        if DEBUG&8: log("map_free_space: %d clusters free in %d run(s)", FREE_CLUSTERS, len(self.free_clusters_map))
         return FREE_CLUSTERS, len(self.free_clusters_map)
 
     def map_compact(self, strategy=0):
-        "TODO: consolidate contiguous runs; sort by run size" 
-        self.free_clusters_map = OrderedDict(sorted(self.free_clusters_map.items(), key=lambda t: t[0])) # sort by disk offset
-        if DEBUG_EXFAT: logging.debug("Free space map (%d runs):\n%s", len(self.free_clusters_map), self.free_clusters_map)
+        "Compacts, eventually reordering, the free space runs map"
+        if not self.free_clusters_flag: return
+        #~ print "Map before:", sorted(self.free_clusters_map.iteritems())
+        map_changed = 0
+        while 1:
+            d=copy.copy(self.free_clusters_map)
+            for k,v in sorted(self.free_clusters_map.iteritems()):
+                while d.get(k+v): # while contig runs exist, merge
+                    v1 = d.get(k+v)
+                    if DEBUG&8: log("Compacting free_clusters_map: {%d:%d} -> {%d:%d}", k,v,k,v+v1)
+                    d[k] = v+v1
+                    del d[k+v]
+                    #~ print "Compacted {%d:%d} -> {%d:%d}" %(k,v,k,v+v1)
+                    #~ print sorted(d.iteritems())
+                    v+=v1
+            if self.free_clusters_map != d:
+                self.free_clusters_map = d
+                map_changed = 1
+                continue
+            break
+        self.free_clusters_flag = 0
+        #~ if strategy == 1:
+            #~ self.free_clusters_map = OrderedDict(sorted(self.free_clusters_map.items(), key=lambda t: t[0])) # sort by disk offset
+        #~ elif strategy == 2:
+            #~ self.free_clusters_map = OrderedDict(sorted(self.free_clusters_map.items(), key=lambda t: t[1])) # sort by run size
+        if DEBUG&8: log("Free space map - %d run(s): %s", len(self.free_clusters_map), self.free_clusters_map)
+        #~ print "Map AFTER:", sorted(self.free_clusters_map.iteritems())
         
     def isset(self, cluster):
-        "Test if the bit corresponding to a given cluster is set"
+        "Tests if the bit corresponding to a given cluster is set"
         assert cluster > 1
         cluster-=2
         self.seek(cluster/8)
@@ -449,16 +240,16 @@ class Bitmap(Chain):
         return (B & (1 << (cluster%8))) != 0
 
     def set(self, cluster, length=1, clear=False):
-        "Set or clear a bit or bits run"
+        "Sets or clears a bit or bits run"
         assert cluster > 1
         cluster-=2 # since bit zero represents cluster #2
         pos = cluster/8
         rem = cluster%8
-        if DEBUG_EXFAT: logging.debug("set(%Xh,%d%s) start @0x%X:%d", cluster+2, length, ('',' (clear)')[clear!=False], pos, rem)
+        if DEBUG&8: log("set(%Xh,%d%s) start @0x%X:%d", cluster+2, length, ('',' (clear)')[clear!=False], pos, rem)
         self.seek(pos)
         if rem:
             B = self.read(1)[0]
-            if DEBUG_EXFAT: logging.debug("got byte 0x%X", B)
+            if DEBUG&8: log("got byte 0x%X", B)
             todo = min(8-rem, length)
             if clear:
                 B &= ~((0xFF>>(8-todo)) << rem)
@@ -467,7 +258,7 @@ class Bitmap(Chain):
             self.seek(-1, 1)
             self.write(chr(B))
             length -= todo
-            if DEBUG_EXFAT: logging.debug("set byte 0x%X, remaining=%d", B, length)
+            if DEBUG&8: log("set byte 0x%X, remaining=%d", B, length)
         octets = length/8
         while octets:
             i = min(32768, octets)
@@ -478,125 +269,119 @@ class Bitmap(Chain):
                 self.write(i*'\xFF')
         rem = length%8
         if rem:
-            if DEBUG_EXFAT: logging.debug("last bits=%d", rem)
+            if DEBUG&8: log("last bits=%d", rem)
             B = self.read(1)[0]
-            if DEBUG_EXFAT: logging.debug("got B=0x%X", B)
+            if DEBUG&8: log("got B=0x%X", B)
             if clear:
                 B &= ~(0xFF>>(8-rem))
             else:
                 B |= (0xFF>>(8-rem))
             self.seek(-1, 1)
             self.write(chr(B))
-            if DEBUG_EXFAT: logging.debug("set B=0x%X", B)
+            if DEBUG&8: log("set B=0x%X", B)
     
-    def findfree(self, start=2, count=0):
-        """Return index and length of the first free clusters run beginning from
+    def findfree(self, count=0):
+        """Returns index and length of the first free clusters run beginning from
         'start' or (-1,-1) in case of failure. If 'count' is given, limit the search
         to that amount."""
         if self.free_clusters_map == None:
             self.map_free_space()
         try:
-            i, n = self.free_clusters_map.popitem(0)
+            i, n = self.free_clusters_map.popitem()
         except KeyError:
             return -1, -1
-        if DEBUG_EXFAT: logging.debug("got run of %d free clusters from #%x", n, i)
+        if DEBUG&8: log("Got run of %d free clusters from %d (%Xh)", n, i, i)
         if n-count > 0:
             self.free_clusters_map[i+count] = n-count # updates map
+            if DEBUG&8: log("New free clusters map: %s", self.free_clusters_map)
         self.free_clusters-=min(n,count)
         return i, min(n, count)
 
     def findmaxrun(self, count=0):
-        "Find a run of at least count clusters or the greatest run available. Returns a tuple (total_free_clusters, (run_start, clusters))"
+        "Finds a run of at least count clusters or the greatest run available. Returns a tuple (total_free_clusters, (run_start, clusters))"
         t = self.last_free_alloc,0
         maxrun=(0,0)
         n=0
         while 1:
             t = self.findfree(t[0]+1, count)
             if t[0] < 0: break
-            if DEBUG_EXFAT: logging.debug("Found %d free clusters from #%d", t[1], t[0])
+            if DEBUG&8: log("Found %d free clusters from #%d", t[1], t[0])
             maxrun = max(t, maxrun, key=lambda x:x[1])
             n += t[1]
             if count and maxrun[1] >= count: break # break if we found the required run
             t = (t[0]+t[1], t[1])
-        if DEBUG_EXFAT: logging.debug("Found the biggest run of %d clusters from #%d on %d total clusters", maxrun[1], maxrun[0], n)
+        if DEBUG&8: log("Found the biggest run of %d clusters from #%d on %d total clusters", maxrun[1], maxrun[0], n)
         return n, maxrun
 
-    def alloc(self, count, start=2, first=0, nofat=False):
-        """Allocate a run and/or chain of free clusters and appropriately mark the FAT.
-        Returns a tuple (<first file cluster>, is_contiguous) or zero in case of failure.
-        count is the number of free clusters to allocate
-        start is the last cluster in a previous set
-        first is the first cluster in such a set
-        nofat is True if clusters in the set are contiguous
-        is_contiguous is False if pool was (or gets) fragmented: in such case, the FAT is
-        marked for newly allocated clusters only and the caller must update it for the
-        preceding ones. Typically, alloc(n) is called the first time for a new file, then
-        alloc(n, x, y) to expand it."""
-        if DEBUG_EXFAT: logging.debug("alloc: requested %d cluster(s) from 0x%X", count, start)
-
+    def alloc(self, runs_map, count, params={}):
+        """Allocates a set of free clusters, marking the FAT and/or the Bitmap.
+        runs_map is the dictionary of previously allocated runs
+        count is the number of clusters to allocate
+        params is an optional dictionary of directives to tune the allocation (to be done). 
+        Returns the last cluster or raise an exception in case of failure"""
         self.map_compact()
 
         if self.free_clusters < count:
-            if DEBUG_EXFAT: logging.debug("can't allocate clusters, there are only %d free", self.free_clusters)
-            raise exFATException("FATAL! Free clusters exhausted, couldn't allocate %d more!" % count)
-        if DEBUG_EXFAT: logging.debug("ok to search, %d clusters free", self.free_clusters)
+            if DEBUG&8: log("Couldn't allocate %d cluster(s), only %d free", count, self.free_clusters)
+            raise exFATException("FATAL! Free clusters exhausted, couldn't allocate %d, only %d left!" % (count, self.free_clusters))
 
-        last = start
-        is_contiguous = False # tell if the full set of clusters, previously and actually allocates, is not fragmented
-        is_firstround = True # tell if we are at loop's beginning
-        first_allocated = -1
-        tot_allocated = 0
+        if DEBUG&8: log("Ok to allocate %d cluster(s), %d free", count, self.free_clusters)
 
+        last_run = None
+        
         while count:
-            if DEBUG_EXFAT: logging.debug("alloc: searching %d cluster(s) from 0x%X", count, self.last_free_alloc)
-            # i=run start, n=clusters found
-            i, n = self.findfree(self.last_free_alloc, count)
-            # Record first allocated cluster
-            if first_allocated < 0: first_allocated = i
-            tot_allocated += n
-            self.set(i, n) # mark the run as allocated in Bitmap
-            # If we found all contiguous clusters on 1st attempt...
-            if is_firstround and n == count:
-                # ... and it's first allocation or continuation of a contiguous run
-                if not first or (nofat and i == last+1):
-                    if DEBUG_EXFAT: logging.debug("alloc: found run of %d clusters from 0x%X", count, i)
-                    count = 0
-                    is_contiguous = True
-                    if not first:
-                        first = i
-                    last = i + count - 1
-                    break
-            # In all other cases, we must update the FAT
-            is_firstround = False
-            if not first:
-                first = i # save the first cluster in the chain
-            else: # if we continue a chain...
-                self.fat[last] = i
-            while count and n:
-                self.fat[i] = i+1 # set the FAT slot as usual and...
-                i += 1
-                n -= 1
-                count -= 1
-            last = i-1
-            self.fat[last] = self.fat.last # temporarily mark as last
-            self.last_free_alloc = last # try this in regular FAT too!
+            if runs_map:
+                last_run = runs_map.items()[-1]
+            i, n = self.findfree(count)
+            if last_run and i == last_run[0]+last_run[1]: # if contiguous
+                runs_map[last_run[0]] = n+last_run[1]
+            else:
+                runs_map[i] = n
+            self.set(i, n) # sets the bitmap
+            if len(runs_map) > 1: # if fragmented
+                self.fat.mark_run(i, n) # marks the FAT also
+                # if just got fragmented...
+                if len(runs_map) == 2:
+                    if not last_run:
+                        last_run = runs_map.items()[0]
+                    if DEBUG&8: log("Chain got fragmented, setting FAT for first fragment {%d (%Xh):%d}", last_run[0], last_run[0], last_run[1])
+                    self.fat.mark_run(last_run[0], last_run[1]) # marks the FAT for 1st frag
+                self.fat[last_run[0]+last_run[1]-1] = i # linkd prev chain with last
+            last = i + n - 1 # last cluster in new run
+            count -= n
+
+        if len(runs_map) > 1:
+            self.fat[last] = self.fat.last
 
         self.last_free_alloc = last
-        if DEBUG_EXFAT: logging.debug("clusters successfully allocated from 0x%X%s", first, ('',' in a contiguous run')[is_contiguous])
-        return first, is_contiguous
 
-    def free(self, start):
-        "Free the Bitmap following a clusters chain"
-        if DEBUG_EXFAT: logging.debug("freeing cluster chain from %Xh", start)
+        if DEBUG&8: log("New runs map: %s", runs_map)
+        return last
+
+    def free1(self, start, length):
+        "Frees the Bitmap only"
+        self.free_clusters_flag = 1
+        self.free_clusters += length
+        self.free_clusters_map[start] = length
+        self.set(start, length, True)
+        #~ print "free set %X:%d clear" % (start, length)
+        if DEBUG&8: log("free1: zeroing run of %d clusters from %Xh", length, start)
+        
+    def free(self, start, runs=None):
+        "Frees the Bitmap following a clusters chain"
+        if DEBUG&8: log("freeing cluster chain from %Xh", start)
+        if runs:
+            for start, count in runs.items():
+                self.free1(start, count)
+            return
         while True:
             length, next = self.fat.count_run(start)
-            if DEBUG_EXFAT: logging.debug("free1: count_run returned %d, %Xh", length, next)
-            if not next: break
-            if DEBUG_EXFAT: logging.debug("free1: zeroing run of %d clusters from %Xh (next=%Xh)", length, start, next)
-            self.set(start, length, True) # clears bitmap only, FAT can be dirty
-            # Updates free clusters count & map
-            self.free_clusters += length
-            self.free_clusters_map[start] = length
+            #~ print "free: count_run(%Xh) returned %d, %Xh" %(start,length, next)
+            if DEBUG&8:
+                log("free: count_run returned %d, %Xh", length, next)
+                log("free: zeroing run of %d clusters from %Xh (next=%Xh)", length, start, next)
+            self.free1(start, length) # clears bitmap only, FAT can be dirty
+            if next==self.fat.last: break
             start = next
 
 
@@ -608,11 +393,10 @@ class Handle(object):
         self.File = None # file contents
         self.Entry = None # direntry slot
         self.Dir = None #dirtable owning the handle
-        self.IsReadOnly = True # use this to prevent updating a Direntry on a read-only filesystem
+        self.IsReadOnly = True
+        self.IsDirectory = False
         atexit.register(self.close)
-
-    def __del__ (self):
-        self.close()
+        if DEBUG&8: log("Registering new empty Handle")
 
     def update_time(self, i=0):
         cdatetime, ms = exFATDirentry.GetDosDateTimeEx()
@@ -628,22 +412,56 @@ class Handle(object):
 
     def seek(self, offset, whence=0):
         self.File.seek(offset, whence)
+        # If alloc on write
+        if not self.Entry.dwStartCluster:
+            self.Entry.Start(self.File.start)
+        # If it gets fragmented
+        self.Entry.IsContig(self.File.nofat)
+        self.Dir._update_dirtable(self.Entry)
 
     def read(self, size=-1):
         self.update_time()
         return self.File.read(size)
 
     def write(self, s):
+        if self.IsReadOnly:
+            raise exFATException("Can't write, filesystem was opened in Read-Only mode!")
         self.File.write(s)
         self.update_time(1)
-        self.IsReadOnly = False
+        #~ self.IsReadOnly = False
+        # If alloc on write
+        if not self.Entry.dwStartCluster:
+            self.Entry.Start(self.File.start)
+        # If it gets fragmented
+        self.Entry.IsContig(self.File.nofat)
+        self.Dir._update_dirtable(self.Entry)
+
+    def ftruncate(self, length, free=0):
+        "Truncates a file to a given size (eventually allocating more clusters), optionally unlinking clusters in excess."
+        if self.IsReadOnly:
+            raise exFATException("Can't truncate, filesystem was opened in Read-Only mode!")
+        self.File.seek(length)
+        self.File.filesize = length
+
+        self.Entry.u64ValidDataLength = self.File.filesize
+        self.Entry.u64DataLength = self.File.filesize
+        # Here we don't know if it is contig!
+        #~ self.IsReadOnly = False
+        self.Dir._update_dirtable(self.Entry)
+        if not free:
+            return 0
+        return self.File.trunc()
 
     def close(self):
-        if not self.IsValid:
+        # 20170608: RE-DESIGN CAREFULLY THE FULL READ-ONLY MATTER!
+        if not self.IsValid or self.IsReadOnly:
+        #~ if not self.IsValid:
+            if DEBUG&8: log("Handle.close rejected %s (EINV ERDO)", self.File)
             return
-
         # Force setting the start cluster if allocated on write
         self.Entry.Start(self.File.start)
+        # Force setting the fragmentation bit
+        self.Entry.IsContig(self.File.nofat)
 
         # If got fragmented at run time
         if self.File.nofat:
@@ -654,28 +472,27 @@ class Handle(object):
 
         if not self.Entry.IsDir():
             if self.Entry.IsDeleted() and self.Entry.Start():
-                if DEBUG_EXFAT: logging.debug("Deleted file: deallocating cluster(s)")
-                self.File.fat.free(self.Entry.Start())
+                if DEBUG&8: log("Deleted file: deallocating cluster(s)")
+                if self.File.nofat:
+                    self.File.boot.bitmap.free1(self.Entry.Start(), rdiv(self.File.filesize, self.File.boot.cluster))
+                else:
+                    self.File.boot.bitmap.free(self.Entry.Start(), self.File.runs)
+                self.IsValid = False
                 return
 
             self.Entry.u64ValidDataLength = self.File.filesize
             self.Entry.u64DataLength = self.File.filesize
-
-            # Free cluster allocated if empty at last
-            if not self.Entry.u64ValidDataLength and self.Entry.Start():
-                if DEBUG_EXFAT: logging.debug("Empty file: deallocating cluster(s)")
-                self.File.boot.bitmap.free(self.Entry.Start())
-                self.Entry.dwStartCluster = 0
         else:
             self.Entry.u64ValidDataLength = self.File.size
             self.Entry.u64DataLength = self.File.size
 
         self.Dir.stream.seek(self.Entry._pos)
-        if DEBUG_EXFAT: logging.debug('Closing Handle @%Xh(%Xh) to "%s", cluster=%Xh tell=%d chain=%d size=%d', \
+        if DEBUG&8: log('Closing Handle @%Xh(%Xh) to "%s", cluster=%Xh tell=%d chain=%d size=%d', \
         self.Entry._pos, self.Dir.stream.realtell(), os.path.join(self.Dir.path,self.Entry.Name()), self.Entry.Start(), self.File.pos, self.File.size, self.File.filesize)
         self.Dir.stream.write(self.Entry.pack())
         self.IsValid = False
-        if DEBUG_EXFAT: logging.debug("Handle close wrote:\n%s", hexdump.hexdump(str(self.Entry._buf),'return'))
+        if DEBUG&8 > 1: log("Handle close wrote:\n%s", hexdump.hexdump(str(self.Entry._buf),'return'))
+        self.Dir._update_dirtable(self.Entry)
 
 
 
@@ -779,7 +596,7 @@ class exFATDirentry(Direntry):
         self._kv = {}
         self.type = self._buf[0] & 0x7F
         if self.type == 0 or self.type not in self.slot_types:
-            if DEBUG_EXFAT: logging.warning("Unknown slot type: %Xh", self.type)
+            if DEBUG&8: logging.warning("Unknown slot type: %Xh", self.type)
         self._kv = self.slot_types[self.type][0].copy() # select right slot ype
         self._name = self.slot_types[self.type][1]
         self._vk = {} # { name: offset}
@@ -789,7 +606,7 @@ class exFATDirentry(Direntry):
             for k in (1,3,4,8,0x14,0x18):
                 self._kv[k+32] = self.stream_extension_layout[k]
                 self._vk[self.stream_extension_layout[k][0]] = k+32
-        #~ if DEBUG_EXFAT: logging.debug("Decoded %s", self)
+        #~ if DEBUG&8: log("Decoded %s", self)
 
     __getattr__ = utils.common_getattr
 
@@ -803,7 +620,7 @@ class exFATDirentry(Direntry):
         if self.type == 5:
             self.wChecksum = self.GetSetChecksum(self._buf) # update the slots set checksum
             self._buf[2:4] = struct.pack('<H', self.wChecksum)
-        if DEBUG_EXFAT: logging.debug("Packed %s", self)
+        if DEBUG&8 > 1: log("Packed %s", self)
         return self._buf
 
     @staticmethod
@@ -881,7 +698,6 @@ class exFATDirentry(Direntry):
     def GetNameHash(name):
         "Computate the Stream Extension file name hash (UTF-16 LE encoded)"
         hash = 0
-        #~ name = name.upper()
         # 'à' == 'à'.upper() BUT u'à' != u'à'.upper()
         name = name.decode('utf-16le').upper().encode('utf-16le') 
         for c in name:
@@ -928,7 +744,7 @@ class exFATDirentry(Direntry):
             k+=j
             self._buf += b
 
-        #~ if DEBUG_EXFAT: logging.debug("GenRawSlotFromName returned:\n%s", hexdump.hexdump(str(self._buf),'return'))
+        #~ if DEBUG&8: log("GenRawSlotFromName returned:\n%s", hexdump.hexdump(str(self._buf),'return'))
 
         return self._buf
 
@@ -936,7 +752,7 @@ class exFATDirentry(Direntry):
 
 class Dirtable(object):
     "Manage an exFAT directory table"
-    dirtable = {} # {cluster: {'Names':{}, 'Handle':Handle}}
+    dirtable = {} # {cluster: {'Names':{}, 'Handle':Handle, 'slots_map':{}}}
 
     def __init__(self, boot, fat, startcluster=0, size=0, nofat=0, path='.'):
         if type(boot) == HandleType:
@@ -950,14 +766,18 @@ class Dirtable(object):
             self.fat = fat
             self.start = startcluster
             self.stream = Chain(boot, fat, startcluster, size, nofat)
-
         self.path = path
-        self.lastfreeslot = 0 # last free slot found (to reduce search time)
+        self.needs_compact = 1
         if self.start not in Dirtable.dirtable:
             # Names maps lowercased names and Direntry slots
             # Handle contains the unique Handle to the directory table
-            Dirtable.dirtable[self.start] = {'Names':{}, 'Handle':None} # Names key MUST be Python Unicode!
+            Dirtable.dirtable[self.start] = {'Names':{}, 'Handle':None, 'slots_map':{}} # Names key MUST be Python Unicode!
+            self.map_slots()
 
+    def __str__ (self):
+        s = "Directory table @LCN %X (LBA %Xh)" % (self.start, self.boot.cl2offset(self.start))
+        return s
+        
     def getdiskspace(self):
         "Return the disk free space in a tuple (clusters, bytes)"
         free_bytes = self.boot.bitmap.free_clusters * self.boot.cluster
@@ -984,6 +804,7 @@ class Dirtable(object):
                 return res
             res.IsValid = True
             res.File = Chain(self.boot, self.fat, e.Start(), e.u64DataLength, nofat=e.IsContig())
+            res.IsReadOnly = (self.boot.stream.mode != 'r+b')
             res.Entry = e
             res.Dir = self
         return res
@@ -1003,18 +824,21 @@ class Dirtable(object):
             found = None
             break
         if found:
-            if DEBUG_EXFAT: logging.debug("opened directory table '%s' @0x%X (cluster 0x%X)", found.path, self.boot.cl2offset(found.start), found.start)
+            if DEBUG&8: log("opened directory table '%s' @0x%X (cluster 0x%X)", found.path, self.boot.cl2offset(found.start), found.start)
             if Dirtable.dirtable[found.start]['Handle']:
                 # Opened many, closed once!
                 found.handle = Dirtable.dirtable[found.start]['Handle']
-                if DEBUG_EXFAT: logging.debug("retrieved previous directory Handle %s", found.handle)
+                if DEBUG&8: log("retrieved previous directory Handle %s", found.handle)
                 # We must update the Chain stream associated with the unique Handle,
                 # or size variations will be discarded!
                 found.stream = found.handle.File
             else:
                 res = Handle()
                 res.IsValid = True
+                res.IsReadOnly = (self.boot.stream.mode != 'r+b')
+                res.IsDirectory = 1
                 res.File = found.stream
+                res.File.isdirectory = 1
                 res.Entry = e
                 res.Dir = self
                 found.handle = res
@@ -1026,6 +850,7 @@ class Dirtable(object):
         res = Handle()
         res.IsValid = True
         res.File = Chain(self.boot, self.fat, 0)
+        res.IsReadOnly = (self.boot.stream.mode != 'r+b')
         if clusters:
             # Force clusters allocation
             res.File.seek(clusters*self.boot.cluster)
@@ -1052,53 +877,55 @@ class Dirtable(object):
         self.stream.write(handle.Entry.pack())
         handle.Dir = self
         self._update_dirtable(handle.Entry)
-        if DEBUG_EXFAT: logging.debug("Created new file '%s' @%Xh", name, handle.File.start)
+        if DEBUG&8: log("Created new file '%s' @%Xh", name, handle.File.start)
         return handle
 
     def mkdir(self, name):
         "Create a new directory slot, allocating the new directory table"
         r = self.opendir(name)
         if r:
-            if DEBUG_EXFAT: logging.debug("mkdir('%s') failed, entry already exists!", name)
+            if DEBUG&8: log("mkdir('%s') failed, entry already exists!", name)
             return r
         # Check if it is a supported name
         if not exFATDirentry.IsValidDosName(name):
-            if DEBUG_EXFAT: logging.debug("mkdir('%s') failed, name contains invalid chars!", name)
+            if DEBUG&8: log("mkdir('%s') failed, name contains invalid chars!", name)
             return None
         handle = self._alloc(name, 1)
+        handle.File.isdirectory = 1
+        handle.IsDirectory = True
         self.stream.seek(handle.Entry._pos)
-        if DEBUG_EXFAT: logging.debug("Making new directory '%s' @%Xh", name, handle.File.start)
+        if DEBUG&8: log("Making new directory '%s' @%Xh", name, handle.File.start)
         handle.Entry.wFileAttributes = 0x10
         handle.Entry.chSecondaryFlags |= 2 # since initially it has 1 cluster only
         handle.Entry.u64ValidDataLength = handle.Entry.u64DataLength = self.boot.cluster
         self.stream.write(handle.Entry.pack())
         handle.Dir = self
-        handle.File.write(bytearray(self.boot.cluster)) # blank table
+        handle.write(bytearray(self.boot.cluster)) # blank table
         self._update_dirtable(handle.Entry)
-        # Record the unique Handle to the directory
-        Dirtable.dirtable[handle.File.start] = {'Names':{}, 'Handle':handle}
+        # Records the unique Handle to the directory
+        Dirtable.dirtable[handle.File.start] = {'Names':{}, 'Handle':handle, 'slots_map':{0:(256<<20)/32}}
         return Dirtable(handle, None, path=os.path.join(self.path, name))
 
     def rmtree(self, name=None):
         "Remove a full directory tree"
         if name:
-            if DEBUG_EXFAT: logging.debug("rmtree:opening %s", name)
+            if DEBUG&8: log("rmtree:opening %s", name)
             target = self.opendir(name)
         else:
             target = self
-            if DEBUG_EXFAT: logging.debug("rmtree:using self: %s", target.path)
+            if DEBUG&8: log("rmtree:using self: %s", target.path)
         if not target:
-            if DEBUG_EXFAT: logging.debug("rmtree:target '%s' not found!", name)
+            if DEBUG&8: log("rmtree:target '%s' not found!", name)
             return 0
         for it in target.iterator():
             n = it.Name()
             if it.IsDir():
                 target.opendir(n).rmtree()
-            if DEBUG_EXFAT: logging.debug("rmtree:erasing '%s'", n)
+            if DEBUG&8: log("rmtree:erasing '%s'", n)
             target.erase(n)
         #~ del target
         if name:
-            if DEBUG_EXFAT: logging.debug("rmtree:finally erasing '%s'", name)
+            if DEBUG&8: log("rmtree:finally erasing '%s'", name)
             self.erase(name)
         return 1
 
@@ -1106,34 +933,98 @@ class Dirtable(object):
         "Update a modified entry in the table"
         handle.close()
 
-    def findfree(self, length=0):
-        "Return the offset of the first free slot in a directory table"
-        s = 1
-        told = self.stream.tell()
-        self.stream.seek(self.lastfreeslot)
-        count = 0
-        found = 0
-        while s:
-            found = self.stream.tell()
-            s = self.stream.read(32)
-            # if we're at table end...
-            if not s or s[0] == 0:
-                if DEBUG_EXFAT: logging.debug("Found next free directory slot @%Xh", found)
-                break
-            # if we search for a specified space, we try also to recycle unused slots
-            if length:
-                if s[0] & 0x80 != 0x80:
-                    count+=32
-                    if count == length:
-                        found = found - count +32
-                        if DEBUG_EXFAT: logging.debug("Found %d unused directory slot(s) @%Xh", count/32, found)
-                        break
-                    continue
-                else:
-                    count = 0
-        self.stream.seek(told)
-        self.lastfreeslot = found
-        return found
+    def map_compact(self):
+        "Compacts, eventually reordering, a slots map"
+        if not self.needs_compact: return
+        #~ print "Map before:", sorted(Dirtable.dirtable[self.start]['slots_map'].iteritems())
+        map_changed = 0
+        while 1:
+            M = Dirtable.dirtable[self.start]['slots_map']
+            d=copy.copy(M)
+            for k,v in sorted(M.iteritems()):
+                while d.get(k+32*v): # while contig runs exist, merge
+                    v1 = d.get(k+32*v)
+                    if DEBUG&8: log("Compacting map: {%d:%d} -> {%d:%d}", k,v,k,v+v1)
+                    d[k] = v+v1
+                    del d[k+32*v]
+                    #~ print "Compacted {%d:%d} -> {%d:%d}" %(k,v,k,v+v1)
+                    #~ print sorted(d.iteritems())
+                    v+=v1
+            if Dirtable.dirtable[self.start]['slots_map'] != d:
+                Dirtable.dirtable[self.start]['slots_map'] = d
+                map_changed = 1
+                continue
+            break
+        self.needs_compact = 0
+        #~ print "Map after:", sorted(Dirtable.dirtable[self.start]['slots_map'].iteritems())
+
+    def map_slots(self):
+        "Fills the free slots map and file names table once at first access"
+        if not Dirtable.dirtable[self.start]['slots_map']:
+            self.stream.seek(0)
+            pos = 0
+            s = ''
+            while True:
+                first_free = -1
+                run_length = -1
+                buf = bytearray()
+                count = 0
+                while True:
+                    s = self.stream.read(32)
+                    if not s or not s[0]: break
+                    if s[0] & 0x80 != 0x80: # if inactive
+                        if first_free < 0:
+                            first_free = pos
+                            run_length = 0
+                        run_length += 1
+                        pos += 32
+                        continue
+                    # if not, and we record an erased slot...
+                    if first_free > -1:
+                        Dirtable.dirtable[self.start]['slots_map'][first_free] = run_length
+                        first_free = -1
+                    if s[0] & 0x7F in (0x5, 0x20): # composite slot
+                        count = s[1] # slots to collect
+                        buf += s
+                        pos += 32
+                        continue
+                    if count:
+                        count -= 1
+                        buf += s
+                        pos += 32
+                        if count: continue
+                    else:
+                        buf += s
+                        pos += 32
+                    self._update_dirtable(exFATDirentry(buf, pos-len(buf)))
+                    buf = bytearray()
+                if not s or not s[0]:
+                    # Maps unallocated space to max table size (256 MiB)
+                    Dirtable.dirtable[self.start]['slots_map'][pos] = ((256<<20) - pos)/32
+                    break
+            self.needs_compact = 1
+            self.stream.seek(0)
+            if DEBUG&8:
+                log("%s collected slots map: %s", self, Dirtable.dirtable[self.start]['slots_map'])
+                log("%s dirtable: %s", self, Dirtable.dirtable[self.start])
+        
+    def findfree(self, length=32):
+        "Returns the offset of the first free slot or requested slot group size (in bytes)"
+        length /= 32 # convert length in slots
+        if DEBUG&8: log("%s: findfree(%d) in map: %s", self, length, Dirtable.dirtable[self.start]['slots_map'])
+        if self.needs_compact:
+            self.map_compact()
+        for start in sorted(Dirtable.dirtable[self.start]['slots_map']):
+            rl = Dirtable.dirtable[self.start]['slots_map'][start]
+            if length > 1 and length > rl: continue
+            del Dirtable.dirtable[self.start]['slots_map'][start]
+            if length < rl:
+                Dirtable.dirtable[self.start]['slots_map'][start+32*length] = rl-length # updates map
+            if DEBUG&8: log("%s: found free slot @%d, updated map: %s", self, start, Dirtable.dirtable[self.start]['slots_map'])
+            return start
+        # exFAT table limit is 256 MiB, about 2.8 mil. slots of minimum size (96 bytes)
+        if DEBUG&8: log("%s: maximum table size reached!",self)
+        raise exFATException("Directory table of '%s' has reached its maximum extension!" % self.path)
 
     def iterator(self):
         told = self.stream.tell()
@@ -1148,7 +1039,7 @@ class Dirtable(object):
             if not s or s[0] == 0: break
             if s[0] & 0x80 != 0x80: continue # unused slot
             if s[0] & 0x7F in (0x5, 0x20): # composite slot
-                count = s[1] # slot to collect
+                count = s[1] # slots to collect
                 buf += s
                 continue
             if count:
@@ -1163,31 +1054,30 @@ class Dirtable(object):
         self.stream.seek(told)
 
     def _update_dirtable(self, it, erase=False):
+        k = it.Name().lower()
         if erase:
-            del Dirtable.dirtable[self.start]['Names'][it.Name().lower()]
+            del Dirtable.dirtable[self.start]['Names'][k]
             return
-        if DEBUG_EXFAT: logging.debug("updating Dirtable name cache with '%s'", it.Name().lower())
-        Dirtable.dirtable[self.start]['Names'][it.Name().lower()] = it
+        if DEBUG&8: log("updating Dirtable name cache with '%s'", k)
+        Dirtable.dirtable[self.start]['Names'][k] = it
 
     def find(self, name):
-        "Find an entry by name. Returns it or None if not found"
-        # Create names cache
-        if DEBUG_EXFAT: logging.debug("entering find('%s')", name)
+        "Finds an entry by name. Returns it or None if not found"
+        # Creates names cache
         if not Dirtable.dirtable[self.start]['Names']:
-            if DEBUG_EXFAT: logging.debug("building Dirtable dictionary")
-            for it in self.iterator():
-                if it.type == 5:
-                    self._update_dirtable(it)
-        name = name.lower().decode('mbcs')
+            self.map_slots()
+        if DEBUG&8:
+            log("find: searching for %s (%s lower-cased)", name, name.lower())
+        name = name.decode('mbcs').lower()
         return Dirtable.dirtable[self.start]['Names'].get(name)
 
     def dump(self, n, range=3):
-        "Return the n-th slot in the table for debugging purposes"
+        "Returns the n-th slot in the table for debugging purposes"
         self.stream.seek(n*32)
         return self.stream.read(range*32)
 
     def erase(self, name):
-        "Mark a file's slot as erased and free the corresponding clusters"
+        "Marks a file's slot as erased and free the corresponding clusters"
         if type(name) == DirentryType:
             e = name
         else:
@@ -1197,50 +1087,47 @@ class Dirtable(object):
         if e.IsDir():
             it = self.opendir(e.Name()).iterator()
             if next in it:
-                if DEBUG_EXFAT: logging.debug("Can't erase non empty directory slot @%d (pointing at #%d)", e._pos, e.Start())
+                if DEBUG&8: log("Can't erase non empty directory slot @%d (pointing at %Xh)", e._pos, e.Start())
                 return 0
         start = e.Start()
-        if DEBUG_EXFAT: logging.debug("Erasing slot @%d (pointing at #%d)", e._pos, start)
+        if DEBUG&8: log("Erasing slot @%d (pointing at %Xh)", e._pos, start)
         if start:
             if e.IsContig():
-                # Free Bitmap only
-                if DEBUG_EXFAT: logging.debug("Erasing contig run of %d clusters from %Xh", rdiv(e.u64ValidDataLength, self.boot.cluster), start)
-                self.boot.bitmap.set(start, rdiv(e.u64ValidDataLength, self.boot.cluster), True)
-                if self.boot.bitmap.free_clusters != None:
-                    self.boot.bitmap.free_clusters += rdiv(e.u64ValidDataLength, self.boot.cluster)
+                # Free Bitmap directly
+                if DEBUG&8: log("Erasing contig run of %d clusters from %Xh", rdiv(e.u64DataLength, self.boot.cluster), start)
+                self.boot.bitmap.free1(start, rdiv(e.u64DataLength, self.boot.cluster))
             else:
-                # Free FAT & Bitmap
-                if DEBUG_EXFAT: logging.debug("Fragmented contents, freeing FAT chain from %Xh", start)
+                # Free Bitmap following the FAT
+                if DEBUG&8: log("Fragmented contents, freeing FAT chain from %Xh", start)
                 self.boot.bitmap.free(start)
         e.Start(0)
         e.chEntryType = 5 # set this, or pack resets to 0x85
-        e.u64ValidDataLength = 0
-        e.u64DataLength = 0
-        self._update_dirtable(e, True)
         for i in range(0, len(e._buf), 32):
             e._buf[i] ^= (1<<7)
         self.stream.seek(e._pos)
         self.stream.write(e._buf)
-        #~ self.lastfreeslot = min(e._pos, self.lastfreeslot) # track the lowest offset of a free slot
-        if DEBUG_EXFAT: logging.debug("Erased slot '%s' @%Xh (pointing at #%d)", name, e._pos, start)
+        Dirtable.dirtable[self.start]['slots_map'][e._pos] = len(e._buf)/32 # updates slots map
+        self.needs_compact = 1
+        if DEBUG&8: log("Erased slot '%s' @%Xh (pointing at #%d)", name, e._pos, start)
+        self._update_dirtable(e, True)
         return 1
 
     def rename(self, name, newname):
-        "Rename a file or directory slot"
+        "Renames a file or directory slot"
         if type(name) == DirentryType:
             e = name
         else:
             e = self.find(name)
             if not e:
-                if DEBUG_EXFAT: logging.debug("Can't find file to rename: '%'s", name)
+                if DEBUG&8: log("Can't find file to rename: '%'s", name)
                 return 0
         if self.find(newname):
-            if DEBUG_EXFAT: logging.debug("Can't rename, file exists: '%s'", newname)
+            if DEBUG&8: log("Can't rename, file exists: '%s'", newname)
             return 0
         # Alloc new slot
         ne = self._alloc(newname)
         if not ne:
-            if DEBUG_EXFAT: logging.debug("Can't alloc new file slot for '%s'", newname)
+            if DEBUG&8: log("Can't alloc new file slot for '%s'", newname)
             return 0
         # Copy attributes from old to new slot
         for k, v in e._kv.items():
@@ -1252,7 +1139,7 @@ class Dirtable(object):
         # Write new entry
         self.stream.seek(ne.Entry._pos)
         self.stream.write(ne.Entry._buf)
-        if DEBUG_EXFAT: logging.debug("'%s' renamed to '%s'", name, newname)
+        if DEBUG&8: log("'%s' renamed to '%s'", name, newname)
         self._update_dirtable(ne.Entry)
         self._update_dirtable(e, True)
         # Mark the old one as erased
@@ -1261,40 +1148,6 @@ class Dirtable(object):
         self.stream.seek(e._pos)
         self.stream.write(e._buf)
         return 1
-
-    def shrink(self, report_only=False):
-        "Shrink table removing clusters with free space or report unused clusters"
-        pos = self.findfree()
-        size = self.stream.size
-        if report_only:
-            return (size-pos)/self.boot.cluster
-        if not (size-pos)/self.boot.cluster: # if free space is less than a cluster
-            if DEBUG_EXFAT: logging.debug("Can't shrink directory table, free space < 1 cluster!")
-            return 0
-        self.stream.seek(pos)
-        self.stream.trunc()
-        if DEBUG_EXFAT: logging.debug("Shrank directory table from %d to %d bytes freeing %d clusters", size, pos, rdiv(size-pos, self.boot.cluster))
-        return 1
-
-    def clean(self, report_only=False):
-        "Compact used slots and remove unused ones, or report amount of wasted space"
-        pos = self.findfree()
-        self.stream.seek(0)
-        buf = bytearray()
-        s = 1
-        while s:
-            s = self.stream.read(32)
-            if not s or s[0] == 0: break
-            if s[0] == 0xE5: continue
-            buf += s
-        if report_only:
-            return pos - len(buf)
-        self.stream.seek(0)
-        self.stream.write(buf) # write valid slots
-        self.lastfreeslot = self.stream.tell()
-        unused = pos - self.stream.tell()
-        self.stream.write(bytearray(unused)) # blank unused area
-        if DEBUG_EXFAT: logging.debug("Cleaned directory table freeing %d slots", unused/32)
 
     @staticmethod
     def _sortby(a, b):
@@ -1306,23 +1159,55 @@ class Dirtable(object):
         else:
             return cmp(Dirtable._sortby.fix.index(a), Dirtable._sortby.fix.index(b))
 
-    def sort(self, by_func=None):
-        "Sort the slot entries alphabetically or applying by_func, compacting them and removing unused ones"
-        d = {}
+    def clean(self, shrink=False):
+        "Compacts used slots and blanks unused ones, optionally shrinking the table"
+        if DEBUG&8: log("Cleaning directory table %s with keep sort function", self.path)
+        return self.sort(None, shrink) # keep order
+
+    def stats(self):
+        "Prints informations about slots in this directory table"
+        in_use = 0
+        count = 0
         for e in self.iterator():
-            d[e.Name()] = e
-
-        names = d.keys()
-        names.sort(by_func)
-
-        pos = self.findfree()
+            count+=1
+            in_use+=len(e._buf)
+        print "%s: %d entries in %d slots on %d allocated" % (self.path, count, in_use/32, self.stream.size/32)
+        
+    def sort(self, by_func=None, shrink=False):
+        """Sorts the slot entries alphabetically or applying by_func, compacting
+        them and zeroing unused ones. Optionally shrinks table. Returns a tuple (used slots, blank slots)."""
+        # CAVE! TABLE MUST NOT HAVE OPEN HANDLES!
+        d = {}
+        names = []
+        for e in self.iterator():
+            n = e.Name()
+            d[n] = e
+            names+=[n]
+        #~ names.sort(key=by_func)
+        if by_func:
+            names.sort(by_func)
         self.stream.seek(0)
         for name in names:
-            self.stream.write(d[name]._buf)
-        self.lastfreeslot = self.stream.tell()
-        unused = pos - self.stream.tell()
+            self.stream.write(d[name]._buf) # re-writes ordered slots
+        last = self.stream.tell()
+        unused = self.stream.size - last
         self.stream.write(bytearray(unused)) # blank unused area
-        if DEBUG_EXFAT: logging.debug("Sorted directory table freeing %d slots", unused/32)
+        if DEBUG&8: log("%s: sorted %d slots, blanked %d", last/32, unused/32)
+        if shrink:
+            c_alloc = rdiv(self.stream.size, self.boot.cluster)
+            c_used = rdiv(last, self.boot.cluster)
+            if c_used < c_alloc:
+                self.stream.seek(last)
+                self.stream.trunc()
+                if DEBUG&8: log("Shrank directory table freeing %d clusters", c_alloc-c_used)
+                unused -= (c_alloc-c_used/32)
+            else:
+                if DEBUG&8: log("Can't shrink directory table, free space < 1 cluster!")
+        # Rebuilds Dirtable caches
+        self.slots_map = {}
+        Dirtable.dirtable[self.start] = {'Names':{}, 'Handle':None, 'slots_map':{}}
+        self.map_slots()
+        return last/32, unused/32
 
     def listdir(self):
         "Return a list of file and directory names in this directory, sorted by on disk position"
@@ -1390,7 +1275,7 @@ def fat_copy_clusters(boot, fat, start):
         #~ src.bitmap = ...
     target = fat.alloc(count) # possibly defragmented
     dst = Chain(boot, fat, target, boot.cluster*count)
-    if DEBUG_EXFAT: logging.debug("Copying %s to %s", src, dst)
+    if DEBUG&8: log("Copying %s to %s", src, dst)
     s = 1
     while s:
         s = src.read(boot.cluster)

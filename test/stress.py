@@ -3,7 +3,8 @@ from random import *
 import sys, os, hashlib, logging, optparse
 
 from Volume import opendisk
-
+import Volume
+from debug import log
 
 class Stress(BaseException):
     pass
@@ -51,6 +52,10 @@ class RandFile(object):
         self.name = name
         # Random file size
         self.size = randint(1, maxsize)
+        # Virtual dir file belongs to
+        self.dirtable = None
+        # Virtual handle to file
+        self.fp = None
 
         if hash:
             self.sha1 = hashlib.sha1(RandFile.Buffer[:self.size]).hexdigest()
@@ -132,14 +137,39 @@ def stress(opts, args):
         n = randint(1, len(files_set)/2)
         for i in range(n):
             f = choice(files_set)
-            j = randint(f.fp.File.size/6, f.fp.File.size/2)
+            j = randint(f.fp.File.filesize/6, f.fp.File.filesize/2)
+            log("truncating %s from %d to %d",f.name,f.fp.File.filesize,j)
             f.fp.ftruncate(j, 1)
             if hasattr(f, 'sha1'):
                 f.sha1 = hashlib.sha1(RandFile.Buffer[:j]).hexdigest()
         return n
 
+    def rand_rewrite(files_set):
+        cb = 0
+        n = randint(1, len(files_set)/2)
+        for i in range(n):
+            f = choice(files_set)
+            for j in range(randint(1, 16)):
+                pos = randint(0, f.fp.File.filesize/2)
+                q = randint(1, f.fp.File.filesize/4)
+                log("vcn=%d vco=%d lastvlcn=%s", f.fp.File.vcn, f.fp.File.vco, f.fp.File.lastvlcn)
+                f.fp.seek(pos)
+                log("vcn=%d vco=%d lastvlcn=%s seek(%d)", f.fp.File.vcn, f.fp.File.vco, f.fp.File.lastvlcn,pos)
+                s = f.fp.read(q)
+                log("vcn=%d vco=%d lastvlcn=%s read(%d)", f.fp.File.vcn, f.fp.File.vco, f.fp.File.lastvlcn, q)
+                if s != RandFile.Buffer[pos:pos+q]:
+                    log("PROBLEM: bytes read in from %s differ from source buffer!",os.path.join(f.fp.Dir.path, f.fp.Entry.Name()))
+                    log("pos=%d, q=%d, len(s)=%d",pos, q, len(s))
+                    log(f.fp.File.runs)
+                else:
+                    log("Data read ok for %s", os.path.join(f.fp.Dir.path, f.fp.Entry.Name()))
+                f.fp.seek(pos)
+                f.fp.write(s)
+                cb+=q
+        return n, cb
+
+
     cb = rand_populate(root, files_set, tree, free_bytes)
-    print "Step 1"
     print "Generated %d random files for %d bytes" % (len(files_set), free_bytes-cb)
 
     print "Creating their handles..."
@@ -150,31 +180,54 @@ def stress(opts, args):
         L = map(lambda x: x.write(), files_set)
         if 1 not in L: break
 
-    print "Step 2"
-    print "Randomly erasing some files..."
-    n, cb = rand_erase(files_set)
-    print "Erased %d bytes in %d files" % (cb, n)
+    if opts.programs & 2:
+        log("----- Randomly erasing some files...")
+        print "Randomly erasing some files..."
+        n, cb = rand_erase(files_set)
+        print "Erased %d bytes in %d files" % (cb, n)
 
-    print "Step 3"
-    print "Randomly truncating some files..."
-    n = rand_truncate(files_set)
-    print "Truncated %d files" % (n)
+    if opts.programs & 4:
+        log("----- Randomly truncating some files...")
+        print "Randomly truncating some files..."
+        n = rand_truncate(files_set)
+        print "Truncated %d files" % (n)
 
-    free_bytes = root.getdiskspace()[1]
-    fset = []
-    cb = rand_populate(root, fset, tree, free_bytes)
-    files_set += fset
-    print "Step 4"
-    print "Generated other %d random files for %d bytes" % (len(fset), free_bytes-cb)
-
-    print "Creating their handles..."
-    map(lambda x: x.create(), fset)
-
-    print "Randomly writing their contents..."
-    while 1:
-        L = map(lambda x: x.write(), fset)
-        if 1 not in L: break
     
+    if opts.programs & 12  or opts.programs & 10:
+        log("----- Randomly filling free space with other files...")
+        free_bytes = root.getdiskspace()[1]
+        fset = []
+        cb = rand_populate(root, fset, tree, free_bytes)
+        files_set += fset
+        print "Generated other %d random files for %d bytes" % (len(fset), free_bytes-cb)
+
+        print "Creating their handles..."
+        map(lambda x: x.create(), fset)
+
+        print "Randomly writing their contents..."
+        while 1:
+            L = map(lambda x: x.write(), fset)
+            if 1 not in L: break
+    
+    if opts.programs & 16:
+        log("----- Randomly re-writing some files...")
+        n, cb = rand_rewrite(files_set)
+        print "Rewritten %d bytes in %d files" % (cb,n)
+
+    if opts.programs & 32:
+        log("----- Cleaning & shrinking directory tables...")
+        for o in files_set:
+            o.fp.close() # prevents altering the dirtable after the cleaning
+        log("----- Closed all open handles")
+        visited = set()
+        for o in files_set:
+            if o.path in visited: continue
+            log("----- Cleaning %s", o.path)
+            visited.add(o.path)
+            o.dirtable.clean(1)
+        log("----- End cleaning directory tables")
+        print "Cleaned and shrinked all directory tables."
+
     print "Done."
 
     if opts.sha1:
@@ -191,6 +244,22 @@ def stress(opts, args):
         fp.close()
         if cb:
             print "WARNING: %d files have pathnames >260 chars!" % cb
+            log("WARNING: %d files have pathnames >260 chars!", cb)
+        cb=0
+        for o in files_set:
+            a = os.path.join(o.path, o.name)
+            #~ if len(a)+4 > 260: continue
+            o.fp.seek(0)
+            s = o.fp.read()
+            if o.sha1 != hashlib.sha1(s).hexdigest():
+                print "SHA1 differ for", a
+                cb+=1
+                log("PROBLEM: wrong SHA-1 on %s (re-read %d bytes)",a,len(s))
+                #~ open('BAD_'+a.replace('\\','_'),'wb').write(s)
+        if cb:
+            print "WARNING: %d files report wrong SHA-1!" % cb
+
+            
 
 
 
@@ -201,7 +270,8 @@ if __name__ == '__main__':
     par = optparse.OptionParser(usage=help_s, version="%prog 1.0", description="Stress a FAT/exFAT file system randomly creating, filling and erasing files.")
     par.add_option("-t", "--threshold", dest="threshold", help="limit the stress test to a given percent of the free space. Default: 99%", metavar="PERCENT", default=99, type="float")
     par.add_option("-s", "--filesize", dest="file_size", help="set the maximum size of a random generated file. Default: 1M", metavar="FILESIZE", default=1<<20, type="int")
-    par.add_option("--debug", action="store_true", dest="debug", help="turn on debug logging to stress.log (may be VERY slow!). Default: OFF", metavar="DEBUG_LOG", default=False)
+    par.add_option("-p", "--programs", dest="programs", help="selects tests to run (bit mask). Default: 63", metavar="PROGRAMS", default=63, type="int")
+    par.add_option("--debug", dest="debug", help="turn on debug logging to stress.log for specified modules (may be VERY slow!). Default: 0. Use 1 (disk), 2 (Volume), 4 (FAT), 8 (exFAT).", metavar="DEBUG_LOG", default=0, type="int")
     par.add_option("--sha1", action="store_true", dest="sha1", help="turn on generating an hash list of generated files. Default: OFF", metavar="HASH_LOG", default=False)
     par.add_option("--fix", action="store_true", dest="fix", help="use a fixed random seed. Default: OFF", metavar="FIX_RAND", default=False)
     opts, args = par.parse_args()
@@ -213,6 +283,10 @@ if __name__ == '__main__':
 
     if opts.debug:
         logging.basicConfig(level=logging.DEBUG, filename='stress.log', filemode='w')
+        Volume.DEBUG = opts.debug
+        Volume.FAT.DEBUG = opts.debug
+        Volume.exFAT.DEBUG = opts.debug
+        Volume.disk.DEBUG = opts.debug
 
     if opts.fix:
         seed(78) # so it repeates the same "random" sequences at every call

@@ -3,6 +3,8 @@ import disk, utils, FAT, exFAT
 
 DEBUG = 0
 
+from debug import log
+
 def rdiv(a, b):
     "Divide a by b eventually rounding up"
     if a % b:
@@ -18,7 +20,7 @@ def opendisk (path, mode='rb'):
     bs = d.read(512)
     d.seek(0)
     fstyp = utils.FSguess(FAT.boot_fat16(bs)) # warning: if we call this a second time on the same Win32 disk, handle is unique and seek set already!
-    if DEBUG: logging.debug("FSguess guessed FS type: %s", fstyp)
+    if DEBUG&2: log("FSguess guessed FS type: %s", fstyp)
 
     if fstyp in ('FAT12', 'FAT16'):
         boot = FAT.boot_fat16(bs, stream=d)
@@ -35,8 +37,9 @@ def opendisk (path, mode='rb'):
 
     fat = FAT.FAT(d, boot.fatoffs, boot.clusters(), bitsize={'FAT12':12,'FAT16':16,'FAT32':32,'EXFAT':32}[fstyp], exfat=(fstyp=='EXFAT'))
 
-    if DEBUG: logging.debug("Inited BOOT object: %s", boot)
-    if DEBUG: logging.debug("Inited FAT object: %s", fat)
+    if DEBUG&2:
+        log("Inited BOOT object: %s", boot)
+        log("Inited FAT object: %s", fat)
 
     if fstyp == 'EXFAT':
         mod = exFAT
