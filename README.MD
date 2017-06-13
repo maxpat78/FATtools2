@@ -8,7 +8,7 @@ Born to re-sort in an arbitrary order the directory entries in a FAT32 root tabl
 Actually, following features are implemented (mostly in Python, with a few ctypes calls to handle Win32 disks natively; *but it works in Linux, also*):
 - sector aligned read/writes with both file images and real Win32 disks
 - sector based caching mechanism (for both reading and writing) to speed-up FAT and directory table operations
-- run length encoded map of free clusters
+- run length encoded map (with tuples and dictionaries) of free clusters, free directory slots, allocated cluster chains
 - transparent reading and writing of FAT12/16/32 and exFAT filesystems with FS boot-sector auto recognizer
 - Long File Name and Unicode support
 - tools to open, create, rename, list and delete files and directories
@@ -19,10 +19,14 @@ Actually, following features are implemented (mostly in Python, with a few ctype
 *Obviously, since a filesystem is an extremely complex and delicate matter, and big bugs may lay around, you'll USE IT TOTALLY AT YOUR OWN RISK!* But it seems quite stable and usable, now.
 
 The most fragile area (and, thus, subject to bugs) was the caching mechanism, that operates in different ways:
-- intercepting small I/O (<= 512 bytes), which is cached in a small buffer. Bigger I/O bypasses the cache; when the cache is full, all dirty sectors are committed to disk and the cache buffer is zeroed. Sectors and buffers are paired with Python builtin dictionaries: this permits a good (from a Pythonic perspective) I/O speed during FAT and directory tables access;
+- intercepting small I/O (<= 512 bytes), which is cached in a small circular buffer. Bigger I/O bypasses the cache; when the cache is full, all dirty sectors are committed to disk and the cache buffer is zeroed. Sectors and buffers are paired with Python builtin dictionaries: this permits a good (from a Pythonic perspective) I/O speed during FAT and directory tables access;
 - mantaining a dictionary of pre-decoded FAT indexes, to improve the speed of repetitive access to cluster chains;
 - mantaining a dictionary of short and long names (paired with their respective directory slots) for each directory table, to speed up searches and updates in directory tables;
-- mantaining a RLE map (in an ordered dictionary) of free clusters, to dramatically improve allocation speed. 
+- mantaining a RLE map of of free clusters, free directory slots and allocated cluster chains, to dramatically improve speed of allocation and file access. 
+
+*Actually, the I/O speed is closer to system's one.*
+
+
 
 Sample usage:
 ```
