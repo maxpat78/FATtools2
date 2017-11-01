@@ -1,4 +1,4 @@
-""" Reorder.pyw     V. 0.05
+""" Reorder.pyw     V. 0.06
 
 Visually alters a FAT/FAT32 directory table order. 
 
@@ -15,6 +15,13 @@ else:
 
 from Volume import *
 
+DEBUG = 0
+
+if DEBUG:
+    import logging
+    logging.basicConfig(level=logging.DEBUG, filename='reorder_gui.log', filemode='w')
+    DEBUG = 2
+    FAT.DEBUG = 4
 
 
 class Manipulator(Tk):
@@ -60,7 +67,8 @@ class Manipulator(Tk):
         w = evt.widget
         index = int(w.curselection()[0])
         value = w.get(index)
-        #~ messagebox.showinfo('Debug', 'You selected item %d: "%s"' % (index, value))
+        if DEBUG:
+            messagebox.showinfo('Debug', 'You selected item %d: "%s"' % (index, value))
         r = p.tbox.get()
         if r[-1] == ':':
             r += '\\'
@@ -90,29 +98,38 @@ class Manipulator(Tk):
             
     def scan(p):
         parts = p.tbox.get().split('\\')
+        if DEBUG:
+            print "DEBUG: parts", parts
         for part in parts:
-            if not part:
-                break
+            if not part: break
             if part[-1] == ':':
-                p.root= opendisk(part, 'r+b')
+                if p.disk != part.lower():
+                    p.root = opendisk(part, 'r+b')  # opening the same drive multiple times is actually unsupported!
+                    p.fold = p.root
+                p.disk = part.lower()
+                if DEBUG:
+                    print "DEBUG: opened disk", p.disk
                 continue
-            root = p.root.opendir(part)
-            if not root:
+            fold = p.root.opendir(part)
+            if not fold:
                 p.entry_text.set(p.entry_text.get()[:-len(part)]) # resets text box back to prev dir
                 messagebox.showerror('Error', "\"%s\" is not a directory!" % (part))
                 return
-            p.root = root
-            #~ print "DEBUG: Opened", root.path
+            p.fold = fold
+            if DEBUG:
+                print "DEBUG: Opened", fold.path
         p.list.delete(0, END)
-        for it in p.root.iterator():
+        for it in p.fold.iterator():
             p.list.insert(END, it.Name())
 
     def apply(p):
         li = p.list.get(0, END)
         if not li:
             return
-        p.root._sortby.fix = li
-        p.root.sort(p.root._sortby)
+        if DEBUG:
+            print "DEBUG: captured order:", li
+        p.fold._sortby.fix = li
+        p.fold.sort(p.fold._sortby)
 
     def quit(p):
         root.destroy()
