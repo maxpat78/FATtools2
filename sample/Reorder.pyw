@@ -1,4 +1,4 @@
-""" Reorder.pyw     V. 0.06
+""" Reorder.pyw     V. 0.08
 
 Visually alters a FAT/FAT32 directory table order. 
 
@@ -29,8 +29,8 @@ class Manipulator(Tk):
         Tk.__init__(p)
         p.disk = ''
         p.title("Reorder a FAT/FAT32 directory table")
-        p.geometry('640x500')
-        frame = Frame(p, width=640, height=500)
+        p.geometry('640x510')
+        frame = Frame(p, width=640, height=510)
         scroll = Scrollbar(frame, orient=VERTICAL)
         p.list = Listbox(frame, selectmode=EXTENDED, yscrollcommand=scroll.set, width=600, height=25)
         p.list.bind('<Double-Button-1>', p.on2click)
@@ -54,25 +54,35 @@ class Manipulator(Tk):
         b.pack(side=LEFT, padx=5)
         b = Button(frame2, text="Help", command=p.help)
         b.pack(side=LEFT, padx=40)
-        b = Label(frame, text="Drive/Folder to reorder: ")
+        b = Label(frame, text="Device/file to open: ")
         b.pack()
-        p.entry_text = StringVar(frame, value='')
-        b = Entry(frame, width=80, textvariable=p.entry_text)
+        p.drive_to_open = StringVar(frame, value='')
+        b = Entry(frame, width=80, textvariable=p.drive_to_open)
         b.bind('<Return>', lambda x: p.scan())
         b.pack()
-        p.tbox = b
+        p.tbox1 = b
+        b = Label(frame, text="Path to reorder: ")
+        b.pack()
+        p.path_to_sort = StringVar(frame, value='.')
+        b = Entry(frame, width=80, textvariable=p.path_to_sort)
+        b.bind('<Return>', lambda x: p.scan())
+        b.pack()
+        p.tbox2 = b
         frame2.pack()
 
     def on2click(p, evt):
         w = evt.widget
         index = int(w.curselection()[0])
         value = w.get(index)
-        if DEBUG:
-            messagebox.showinfo('Debug', 'You selected item %d: "%s"' % (index, value))
-        r = p.tbox.get()
-        if r[-1] == ':':
+        if value == '.': return
+        #~ if DEBUG:
+            #~ messagebox.showinfo('Debug', 'You selected item %d: "%s"' % (index, value))
+        r = p.tbox2.get()
+        if value != '..':
             r += '\\'
-        p.entry_text.set(os.path.join(r, value))
+            p.path_to_sort.set(os.path.join(r, value))
+        else:
+            p.path_to_sort.set(r[:r.rfind('\\')])
         p.scan_button.invoke() # but we don't know if it is a directory...
 
     def move_up(p):
@@ -97,27 +107,33 @@ class Manipulator(Tk):
             p.list.insert(i, it)
             
     def scan(p):
-        parts = p.tbox.get().split('\\')
-        if DEBUG:
-            print "DEBUG: parts", parts
-        for part in parts:
-            if not part: break
-            if part[-1] == ':':
-                if p.disk != part.lower():
-                    p.root = opendisk(part, 'r+b')  # opening the same drive multiple times is actually unsupported!
-                    p.fold = p.root
-                p.disk = part.lower()
-                if DEBUG:
-                    print "DEBUG: opened disk", p.disk
-                continue
-            fold = p.root.opendir(part)
-            if not fold:
-                p.entry_text.set(p.entry_text.get()[:-len(part)]) # resets text box back to prev dir
-                messagebox.showerror('Error', "\"%s\" is not a directory!" % (part))
-                return
-            p.fold = fold
+        root_object = p.tbox1.get()
+        if not root_object: return
+        if root_object[-1] == os.sep:
+            root_object = root_object[:-1]
+        if p.disk != root_object.lower(): # opening the same drive multiple times is actually unsupported!
             if DEBUG:
-                print "DEBUG: Opened", fold.path
+                print "DEBUG: volume to open", root_object
+            p.disk = root_object.lower()
+            try:
+                p.root = opendisk(p.disk, 'r+b')
+            except:
+                messagebox.showerror('Error', 'Could not open volume "%s"!' % (root_object))
+                return
+        relapath = p.path_to_sort.get()
+        if DEBUG:
+            print "DEBUG: internal path to access:", relapath
+        if relapath == '.':
+            fold = p.root
+        else:
+            fold = p.root.opendir(relapath[2:]) # truncates .\
+        if not fold:
+            messagebox.showerror('Error', "\"%s\" is not a directory!" % (relapath))
+            p.path_to_sort.set(relapath[:relapath.rfind('\\')])
+            return
+        p.fold = fold
+        if DEBUG:
+            print "DEBUG: scanning", fold.path
         p.list.delete(0, END)
         for it in p.fold.iterator():
             p.list.insert(END, it.Name())
@@ -137,7 +153,8 @@ class Manipulator(Tk):
     def help(p):
         messagebox.showinfo('Quick Help', '''To edit a directory table order in a FAT/FAT32 disk:
         
-- insert the drive or the full directory path in the text box below
+- specify the device or image file containing the filing system in the first text box below
+- specify the path to edit in the second box (default is root, '.')
 - press 'Enter' or select 'Scan' to (re)scan the directory table specified and show the on-disk order in the upper list box
 - select one or more items and move them up, down or to the top with the 'UP', 'DN' and 'T' buttons (double click to enter a directory)
 - press 'Apply' to write the newly ordered table back to the disk
