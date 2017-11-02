@@ -1,4 +1,4 @@
-# -*- coding: mbcs -*-
+# -*- coding: cp1252 -*-
 import os, sys, atexit
 from ctypes import *
 from debug import log

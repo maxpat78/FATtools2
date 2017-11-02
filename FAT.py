@@ -1,4 +1,4 @@
-# -*- coding: mbcs -*-
+# -*- coding: cp1252 -*-
 # Utilities to manage a FAT12/16/32 file system
 #
 
@@ -1380,9 +1380,11 @@ class Dirtable(object):
         name = name.replace('/','\\')
         path = name.split('\\')
         found = self
+        parent = self # records parent dir handle
         for com in path:
             e = found.find(com)
             if e and e.IsDir():
+                parent = found
                 found = Dirtable(self.boot, self.fat, e.Start(), path=os.path.join(found.path, com))
                 continue
             found = None
@@ -1404,7 +1406,7 @@ class Dirtable(object):
                 res.File = found.stream
                 res.File.isdirectory = 1
                 res.Entry = e
-                res.Dir = self
+                res.Dir = parent
                 found.handle = res
                 Dirtable.dirtable[found.start]['Handle'] = res
         return found

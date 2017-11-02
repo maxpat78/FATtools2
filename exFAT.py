@@ -1,4 +1,4 @@
-# -*- coding: mbcs -*-
+# -*- coding: cp1252 -*-
 # Utilities to manage an exFAT  file system
 #
 
@@ -815,10 +815,12 @@ class Dirtable(object):
         name = name.replace('/','\\')
         path = name.split('\\')
         found = self
+        parent = self # records parent dir handle
         for com in path:
             if len(com) > 242: return None
             e = found.find(com)
             if e and e.IsDir():
+                parent = found
                 found = Dirtable(self.boot, self.fat, e.Start(), e.u64ValidDataLength, e.IsContig(), path=os.path.join(found.path, com))
                 continue
             found = None
@@ -840,7 +842,7 @@ class Dirtable(object):
                 res.File = found.stream
                 res.File.isdirectory = 1
                 res.Entry = e
-                res.Dir = self
+                res.Dir = parent
                 found.handle = res
                 Dirtable.dirtable[found.start]['Handle'] = res
         return found
