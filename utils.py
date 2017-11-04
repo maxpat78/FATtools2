@@ -1,4 +1,4 @@
-# -*- coding: mbcs -*-
+# -*- coding: cp1252 -*-
 import struct
 
 def class2str(c, s):

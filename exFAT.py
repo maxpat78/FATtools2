@@ -4,7 +4,7 @@
 
 DEBUG=0
 
-import copy, os, struct, time, cStringIO, atexit
+import sys, copy, os, struct, time, cStringIO, atexit
 from datetime import datetime
 from collections import OrderedDict
 from debug import log
@@ -15,7 +15,7 @@ from FAT import FAT, Chain
 if DEBUG&8:
     import hexdump
 
-
+FS_ENCODING = sys.getfilesystemencoding()
 
 class exFATException(Exception):
 	pass
@@ -726,7 +726,7 @@ class exFATDirentry(Direntry):
         self.chmsCTime = self.chmsMTime = self.chmsATime = cms
         # Stream Extension part
         self.chSecondaryFlags = 1 # base value, to show the entry could be allocated
-        name = name.decode('mbcs').encode('utf-16le')
+        name = name.decode(FS_ENCODING).encode('utf-16le')
         self.chNameLength = len(name)/2
         self.wNameHash = self.GetNameHash(name)
 
@@ -1070,7 +1070,7 @@ class Dirtable(object):
             self.map_slots()
         if DEBUG&8:
             log("find: searching for %s (%s lower-cased)", name, name.lower())
-        name = name.decode('mbcs').lower()
+        name = name.decode(FS_ENCODING).lower()
         return Dirtable.dirtable[self.start]['Names'].get(name)
 
     def dump(self, n, range=3):

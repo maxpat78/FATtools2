@@ -4,7 +4,7 @@
 
 DEBUG=0
 
-import copy, os, struct, time, cStringIO, atexit
+import sys, copy, os, struct, time, cStringIO, atexit
 from datetime import datetime
 from collections import OrderedDict
 from zlib import crc32
@@ -13,6 +13,8 @@ from debug import log
 
 if DEBUG&4:
     import hexdump
+
+FS_ENCODING = sys.getfilesystemencoding()
 
 class FATException(Exception):
 	pass
@@ -1235,7 +1237,7 @@ class FATDirentry(Direntry):
         self._buf = bytearray(struct.pack('<11s3B7HI', shortname, 0x20, chFlags, 0, ctime, cdate, cdate, 0, ctime, cdate, 0, 0))
 
         if longname:
-            longname = longname.decode('mbcs').encode('utf-16le') # CHECK if 'mbcs' is good for Linux!
+            longname = longname.decode(FS_ENCODING).encode('utf-16le')
             if len(longname) > 510:
                 raise FATException("Long name '%s' is >255 characters!" % longname)
             csum = self.Checksum(shortname)
@@ -1654,7 +1656,7 @@ class Dirtable(object):
         if DEBUG&4:
             log("find: searching for %s (%s lower-cased)", name, name.lower())
             log("find: LFNs=%s", Dirtable.dirtable[self.start]['LFNs'])
-        name = name.decode('mbcs').lower()
+        name = name.decode(FS_ENCODING).lower()
         return Dirtable.dirtable[self.start]['LFNs'].get(name) or \
         Dirtable.dirtable[self.start]['Names'].get(name)
 
