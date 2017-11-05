@@ -1,4 +1,4 @@
-""" Reorder.pyw     V. 0.08
+""" Reorder.pyw     V. 0.09
 
 Visually alters a FAT/FAT32 directory table order. 
 
@@ -79,10 +79,10 @@ class Manipulator(Tk):
             #~ messagebox.showinfo('Debug', 'You selected item %d: "%s"' % (index, value))
         r = p.tbox2.get()
         if value != '..':
-            r += '\\'
+            r += os.sep
             p.path_to_sort.set(os.path.join(r, value))
         else:
-            p.path_to_sort.set(r[:r.rfind('\\')])
+            p.path_to_sort.set(r[:r.rfind(os.sep)])
         p.scan_button.invoke() # but we don't know if it is a directory...
 
     def move_up(p):
@@ -120,7 +120,7 @@ class Manipulator(Tk):
             except:
                 messagebox.showerror('Error', 'Could not open volume "%s"!' % (root_object))
                 return
-        relapath = p.path_to_sort.get()
+        relapath = p.path_to_sort.get().replace('/','\\')
         if DEBUG:
             print "DEBUG: internal path to access:", relapath
         if relapath == '.':
@@ -129,7 +129,7 @@ class Manipulator(Tk):
             fold = p.root.opendir(relapath[2:]) # truncates .\
         if not fold:
             messagebox.showerror('Error', "\"%s\" is not a directory!" % (relapath))
-            p.path_to_sort.set(relapath[:relapath.rfind('\\')])
+            p.path_to_sort.set(relapath[:relapath.rfind(os.sep)])
             return
         p.fold = fold
         if DEBUG:
