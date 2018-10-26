@@ -1123,7 +1123,7 @@ class FATDirentry(Direntry):
             return ln[:i]
 
     def ShortName(self):
-        return self.GenShortName(self._buf[-32:-21], self.chFlags)
+        return self.GetShortName(self._buf[-32:-21], self.chFlags)
 
     def Name(self):
         return self.LongName() or self.ShortName()
@@ -1179,14 +1179,15 @@ class FATDirentry(Direntry):
         return name, chFlags
 
     @staticmethod
-    def GenShortName(shortname, chFlags=0):
+    def GetShortName(shortname, chFlags=0):
         "Makes a human readable short name from slot's one"
+        if DEBUG&4: log("GetShortName got %s:%d",shortname,chFlags)
         shortname=str(shortname)
         name = shortname[:8].rstrip()
         if chFlags & 0x8: name = name.lower()
         ext = shortname[8:].rstrip()
         if chFlags & 0x16: ext = ext.lower()
-        if DEBUG&4: log("GenShortName returned %s.%s",name,ext)
+        if DEBUG&4: log("GetShortName returned %s:%s",name,ext)
         if not ext: return name
         return name + '.' + ext
 
@@ -1202,14 +1203,16 @@ class FATDirentry(Direntry):
         #~ print nname, ext
         # If no replacement and name is short (LIBs -> LIBS)
         if len(nname) < 9 and nname in name and ext in name:
-            if DEBUG&4: log("GenRawShortFromLongName (0) returned %s:%s",nname,ext[1:4])
-            return (nname + ext[1:4]).upper()
+            short = ('%-8s%-3s' % (nname, ext[1:4])).upper()
+            if DEBUG&4: log("GenRawShortFromLongName (0) returned %s",short)
+            return short
         # Windows 9x: ~1 ... ~9999... as needed
         tilde = '~%d' % id
         i = 8 - len(tilde)
         if i > len(nname): i = len(nname)
-        if DEBUG&4: log("GenRawShortFromLongName (1) returned %s:%s",nname[:i]+tilde,ext[1:4])
-        return (nname[:i] + tilde + ext[1:4]).upper()
+        short = ('%-8s%-3s' % (nname[:i] + tilde, ext[1:4])).upper()
+        if DEBUG&4: log("GenRawShortFromLongName (1) returned %s",short)
+        return short
 
     @staticmethod
     def GenRawShortFromLongNameNT(name, id=1):
@@ -1224,7 +1227,7 @@ class FATDirentry(Direntry):
         i = 6 - len(tilde)
         # Windows NT 4+: ~1...~4; then: orig chars (1 or 2)+some CRC-16 (4 chars)+~1...~9
         # Expands tilde index up to 999.999 if needed like '95
-        shortname = (name[:2] + hex(crc)[::-1][:i] + tilde + ext[1:4]).upper()
+        shortname = ('%-8s%-3s' % (name[:2] + hex(crc)[::-1][:i] + tilde, ext[1:4])).upper()
         if DEBUG&4: log("Generated NT-style short name %s for %s", shortname, longname)
         return shortname
 
@@ -1421,10 +1424,10 @@ class Dirtable(object):
         # If name is a LFN, generate a short one valid in this table
         if not FATDirentry.IsShortName(name):
             i = 1
-            short = FATDirentry.GenShortName(FATDirentry.GenRawShortFromLongNameNT(name, i))
+            short = FATDirentry.GetShortName(FATDirentry.GenRawShortFromLongNameNT(name, i))
             while self.find(short):
                 i += 1
-                short = FATDirentry.GenShortName(FATDirentry.GenRawShortFromLongNameNT(name, i))
+                short = FATDirentry.GetShortName(FATDirentry.GenRawShortFromLongNameNT(name, i))
             dentry.GenRawSlotFromName(short, name)
         else:
             dentry.GenRawSlotFromName(name)
@@ -1637,6 +1640,9 @@ class Dirtable(object):
 
     def _update_dirtable(self, it, erase=False):
         "Updates internal cache of object names and their associated slots"
+        if DEBUG&4:
+            log("_update_dirtable (erase=%d) for %s", erase, it)
+            log("_update_dirtable: short alias is %s", it.ShortName().lower())
         if erase:
             del Dirtable.dirtable[self.start]['Names'][it.ShortName().lower()]
             ln = it.LongName()
