@@ -759,6 +759,7 @@ class Chain(object):
         if not size:
             if DEBUG&4: log("Chain%08X: returning empty buffer", self.start)
             return buf
+        self.seek(self.pos) # coerce real stream to the right position!
         if self.nofat: # contiguous clusters
             buf += self.stream.read(size)
             self.pos += size
