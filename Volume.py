@@ -122,7 +122,7 @@ def copy_tree_in(base, dest, callback=None, attributes=None, chunk_size=1<<20):
                         dst.chmsCTime = ms
                     else:
                         dst.Entry.wADate = FAT.FATDirentry.MakeDosDate((tm.tm_year, tm.tm_mon, tm.tm_mday))
-                        dst.Entry.wATime = FAT.FATDirentry.MakeDosTime((tm.tm_hour, tm.tm_min, tm.tm_sec))
+                        #~ dst.Entry.wATime = FAT.FATDirentry.MakeDosTime((tm.tm_hour, tm.tm_min, tm.tm_sec)) # FAT does not support this!
             dst.close()
 
 
@@ -155,12 +155,23 @@ def copy_tree_out(base, dest, callback=None, attributes=None, chunk_size=1<<20):
 
             if attributes: # bit mask: 1=preserve creation time, 2=last modification, 3=last access
                 if attributes & 1:
-                    CTime = fpi.Entry.ParseDosDate(fpi.Entry.wCDate) + fpi.Entry.ParseDosTime(fpi.Entry.wCTime) + (0,0,0)
                     pass # utime does not support this
                 if attributes & 2:
-                    MTime = fpi.Entry.ParseDosDate(fpi.Entry.wMDate) + fpi.Entry.ParseDosTime(fpi.Entry.wMTime) + (0,0,0)
-                    os.utime(dst, (0, time.mktime(MTime)))
+                    if base.fat.exfat:
+                        wTime = fpi.Entry.dwMTime & 0xFFFF
+                        wDate = fpi.Entry.dwMTime >> 16
+                        MTime = fpi.Entry.ParseDosDate(wDate) + fpi.Entry.ParseDosTime(wTime) + (0,0,0)
+                        os.utime(dst, (0, time.mktime(MTime)))
+                    else:
+                        MTime = fpi.Entry.ParseDosDate(fpi.Entry.wMDate) + fpi.Entry.ParseDosTime(fpi.Entry.wMTime) + (0,0,0)
+                        os.utime(dst, (0, time.mktime(MTime)))
                 if attributes & 4:
-                    ATime = fpi.Entry.ParseDosDate(fpi.Entry.wADate) + fpi.Entry.ParseDosTime(fpi.Entry.wATime) + (0,0,0)
-                    os.utime(dst, (time.mktime(ATime), 0))
+                    if base.fat.exfat:
+                        wTime = fpi.Entry.dwATime & 0xFFFF
+                        wDate = fpi.Entry.dwATime >> 16
+                        ATime = fpi.Entry.ParseDosDate(wDate) + fpi.Entry.ParseDosTime(wTime) + (0,0,0)
+                        os.utime(dst, (0, time.mktime(ATime)))
+                    else:
+                        ATime = fpi.Entry.ParseDosDate(fpi.Entry.wADate) + (0,0,0,0,0,0)
+                        os.utime(dst, (time.mktime(ATime), 0))
     
