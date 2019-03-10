@@ -17,6 +17,7 @@ def opendisk (path, mode='rb'):
     if os.name =='nt' and len(path)==2 and path[1] == ':':
         path = '\\\\.\\'+path
     d = disk.disk(path, mode)
+    d.seek(0)
     bs = d.read(512)
     d.seek(0)
     fstyp = utils.FSguess(FAT.boot_fat16(bs)) # warning: if we call this a second time on the same Win32 disk, handle is unique and seek set already!
@@ -160,7 +161,7 @@ def copy_tree_out(base, dest, callback=None, attributes=None, chunk_size=1<<20):
                     if base.fat.exfat:
                         wTime = fpi.Entry.dwMTime & 0xFFFF
                         wDate = fpi.Entry.dwMTime >> 16
-                        MTime = fpi.Entry.ParseDosDate(wDate) + fpi.Entry.ParseDosTime(wTime) + (0,0,0)
+                        MTime = FAT.FATDirentry.ParseDosDate(wDate) + FAT.FATDirentry.ParseDosTime(wTime) + (0,0,0)
                         os.utime(dst, (0, time.mktime(MTime)))
                     else:
                         MTime = fpi.Entry.ParseDosDate(fpi.Entry.wMDate) + fpi.Entry.ParseDosTime(fpi.Entry.wMTime) + (0,0,0)
@@ -169,7 +170,7 @@ def copy_tree_out(base, dest, callback=None, attributes=None, chunk_size=1<<20):
                     if base.fat.exfat:
                         wTime = fpi.Entry.dwATime & 0xFFFF
                         wDate = fpi.Entry.dwATime >> 16
-                        ATime = fpi.Entry.ParseDosDate(wDate) + fpi.Entry.ParseDosTime(wTime) + (0,0,0)
+                        ATime = FAT.FATDirentry.ParseDosDate(wDate) + FAT.FATDirentry.ParseDosTime(wTime) + (0,0,0)
                         os.utime(dst, (0, time.mktime(ATime)))
                     else:
                         ATime = fpi.Entry.ParseDosDate(fpi.Entry.wADate) + (0,0,0,0,0,0)
