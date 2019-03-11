@@ -251,7 +251,7 @@ class FAT(object):
         if bitsize == 16:
             self.reserved = 0xFFF7
             self.bad = 0xFFF7
-            self.last = 0xFFF8
+            self.last = 0xFFFF
         elif bitsize == 32:
             self.reserved = 0x0FFFFFF7 # FAT32 uses 28 bits only
             self.bad = 0x0FFFFFF7
@@ -280,7 +280,7 @@ class FAT(object):
             assert 2 <= index <= self.real_last
         except AssertionError:
             if DEBUG&4: log("Attempt to read unexistant FAT index #%d", index)
-            raise FATException("Attempt to read unexistant FAT index #%d" % index)
+            #~ raise FATException("Attempt to read unexistant FAT index #%d" % index)
             return self.last
         slot = self.decoded.get(index)
         if slot: return slot
@@ -305,11 +305,13 @@ class FAT(object):
             assert 2 <= index <= self.real_last
         except AssertionError:
             if DEBUG&4: log("Attempt to set invalid cluster index 0x%X with value 0x%X", index, value)
+            return
             raise FATException("Attempt to set invalid cluster index 0x%X with value 0x%X" % (index, value))
         try:
             assert value <= self.real_last or value >= self.reserved
         except AssertionError:
             if DEBUG&4: log("Attempt to set invalid value 0x%X in cluster 0x%X", value, index)
+            return
             raise FATException("Attempt to set invalid cluster index 0x%X with value 0x%X" % (index, value))
         self.decoded[index] = value
         dsp = (index*self.bits)/8
@@ -523,14 +525,17 @@ class FAT(object):
         "Mark a range of consecutive FAT clusters (optimized for FAT16/32)"
         if not count: return
         if DEBUG&4: log("mark_run(%Xh, %d, clear=%d)", start, count, clear)
+        if start<2 or start>self.real_last:
+            if DEBUG&4: log("attempt to mark invalid run, aborted!")
+            return
         if self.bits == 12:
+            if clear == True:
+                self.free_clusters_flag = 1
+                self.free_clusters_map[start] = count
             while count:
                 self[start] = (start+1, 0)[clear==True]
                 start+=1
                 count-=1
-            if clear == True:
-                self.free_clusters_flag = 1
-                self.free_clusters_map[start] = count
             return
         dsp = (start*self.bits)/8
         pos = self.offset+dsp
@@ -590,6 +595,9 @@ class FAT(object):
 
     def free(self, start, runs=None):
         "Free a clusters chain, one run at a time (except FAT12)"
+        if start < 2 or start > self.real_last:
+            if DEBUG&4: log("free: attempt to free from invalid cluster %Xh", start)
+            return
         self.free_clusters_flag = 1
         if runs:
             for run in runs:
@@ -610,7 +618,7 @@ class FAT(object):
                 self.free_clusters += length
                 self.free_clusters_map[start] = length
             start = next
-            if next == self.last: break
+            if self.last <= next <= self.last+7: break
 
 
 
