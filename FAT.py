@@ -336,7 +336,7 @@ class FAT(object):
         self.stream.write(value)
         if self.exfat: return # exFAT has one FAT only (default)
         pos = self.offset2+dsp
-        #~ log("setting FAT2[%Xh]=%Xh @%Xh", index, value, pos)
+        if DEBUG&4: log("setting FAT2[0x%X] @0x%X", index, pos)
         self.stream.seek(pos)
         self.stream.write(value)
 
@@ -543,9 +543,14 @@ class FAT(object):
         if clear:
             for i in xrange(start, start+count):
                 self.decoded[i] = 0
-            self.stream.write(bytearray(count*(self.bits/8)*'\x00'))
+            run = bytearray(count*(self.bits/8)*'\x00')
+            self.stream.write(run)
             self.free_clusters_flag = 1
             self.free_clusters_map[start] = count
+            if self.exfat: return # exFAT has one FAT only (default)
+            # updating FAT2, too!
+            self.stream.seek(self.offset2+dsp)
+            self.stream.write(run)
             return
         # consecutive values to set
         L = xrange(start+1, start+1+count)
@@ -555,7 +560,13 @@ class FAT(object):
         # converted in final LE WORD/DWORD array
         L = map(lambda x: struct.pack(self.fat_slot_fmt, x), L)
         L[-1] = struct.pack(self.fat_slot_fmt, self.last)
-        self.stream.write(bytearray().join(L))
+        run = bytearray().join(L)
+        self.stream.write(run)
+        if self.exfat: return # exFAT has one FAT only (default)
+        # updating FAT2, too!
+        pos = self.offset2+dsp
+        self.stream.seek(pos)
+        self.stream.write(run)
 
     def alloc(self, runs_map, count, params={}):
         """Allocates a set of free clusters, marking the FAT.
