@@ -8,19 +8,11 @@ optimize SetFilePointer speed due to 64-bit upgrading?
 reduce real disk seeking with a variable to track disk position and avoid calling system seek?
 
 
-BUGS/TODO: (Volume.py)
-- date/time preservation in copy_tree_out
-
-
 BUGS/TODO: (FAT.py)
-- ensure Dirtable cache is updated when an entry is altered (i.e. when erasing) (exFAT too)
-- Handle: update Dirtable cache when altering sizes/times (write, ftruncate, seek past end)?
 - Dirtable.iterator: provide a way to optionally iterate on (already) cached entries w/o accessing to disk again?
-- Chain size: since a chain can legally have clusters allocated but not assigned to disk contents (i.o.w. real file size < allocated chain size), effective chain length SHOULD be tested always at first access, not relying upon passed file size!
+- Chain size: since a chain can legally have clusters allocated but not assigned to disk contents (i.o.w. real file size < allocated chain size), effective chain length SHOULD be tested always at first access, not relying upon passed file size?
 - strategies in RLE map compactors: sort by reversed size or offset
 - caching with simpler dict {start_sector: [decoded_values]} ?
-- unique handle to directories (to auto-update once on closing) (copy from exFAT?)?
-- merge create in open with modes? (exFAT too)
 - open w/ full path like opendir? (exFAT too)
 - pack & co.: update str += str with list join?
 - update FAT32 FSInfo?
@@ -29,17 +21,13 @@ BUGS/TODO: (FAT.py)
 
 
 BUGS/TODO: (exFAT.py)
-- verify limits in names (255) and pathnames (260)
-- implement frags, clean & co.
 - mkdirs?
-- merge exFAT w/ FAT Chain (write) // 31.8.16 bug in FAT alloc prevented this?
 - implement set/clear Label (FAT too)
 - update space and cluster stats in boot sector?
 BITMAP:
 - bitmap is FATted, so it's slower: dict{pos:QWORD}?
 - defer Bitmap file update (allocation is really showed already by slot or FAT)?
 OTHER:
-- test 256M limit per directory table?
 - parameters {} to tune cluster allocator?
 - generalize pack() in utils.py
 
@@ -47,7 +35,3 @@ OTHER:
 BUGS/TODO: (Reorder.pyw)
 exclude . and .. from subdirs?
 use U D T button and eventually other accelerators?
-
-
-TODO: (partutils.py)
-- handle MBR and UEFI partitions
