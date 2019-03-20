@@ -27,8 +27,9 @@ GPT adotta nel MBR di protezione la terna (1023, 255, 63) o FF FF FF e il
 tipo di partizione 0xEE."""
 
 import utils, struct
+from gptutils import *
 
-DEBUG = 1
+DEBUG = 0
 
 from debug import log
 
@@ -85,7 +86,7 @@ def raw2chs(t):
 
 def mkpart(offset, size, hpc=16):
     c, h, s = size2chs(size, 1)
-    print "Rounded CHS for %.02f MiB is %d-%d-%d (%.02f MiB)" % (size/(1<<20), c,h,s, 512*c*h*s/(1<<20))
+    #~ print "Rounded CHS for %.02f MiB is %d-%d-%d (%.02f MiB)" % (size/(1<<20), c,h,s, 512*c*h*s/(1<<20))
     size = 512*c*h*s # adjust size
     dwFirstSectorLBA = offset/512
     sFirstSectorCHS = lba2chs(dwFirstSectorLBA, hpc)

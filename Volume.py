@@ -13,6 +13,7 @@ def rdiv(a, b):
         return a/b
 
 def opendisk1 (path, mode='rb', partition=0):
+    "Open a partition returning a file system handle"
     if os.name =='nt' and len(path)==2 and path[1] == ':':
         path = '\\\\.\\'+path
     d = disk.disk(path, mode)
@@ -27,41 +28,55 @@ def opendisk1 (path, mode='rb', partition=0):
         print "Invalid Master Boot Record. Aborted."
         sys.exit(1)
 
-    # TODO: check if valid dwFirstSectorLBA or use CHS! check GPT!
-    index=0
-    if partition > 0:
-        index = 1 # opens Extended Partition
-    part = disk.partition(d, mbr.partitions[index].offset(), mbr.partitions[index].size())
-    if DEBUG&2: log("Opened %s partition @%016x (LBA %016x) %s", ('Primary', 'Extended')[index], mbr.partitions[index].chsoffset(), mbr.partitions[index].lbaoffset(), partutils.raw2chs(mbr.partitions[index].sFirstSectorCHS))
-    if partition > 0:
-        wanted = 1
-        extpart = part
-        while wanted <=partition:
-            bs = extpart.read(512)
-            ebr = partutils.MBR(bs, disksize=d.size) # reads Extended Boot Record
-            if DEBUG&2: log("Opened EBR: %s", ebr)
-            if ebr.wBootSignature != 0xAA55:
-                print "Invalid Extended Boot Record. Aborted."
-                sys.exit(1)
-            if DEBUG&2: log("Got partition @%016x (@%016x rel.) %s", ebr.partitions[0].chsoffset(), ebr.partitions[0].lbaoffset(), partutils.raw2chs(ebr.partitions[0].sFirstSectorCHS))
-            if DEBUG&2: log("Next logical partition @%016x (@%016x rel.) %s", ebr.partitions[1].chsoffset(), ebr.partitions[1].lbaoffset(), partutils.raw2chs(ebr.partitions[1].sFirstSectorCHS))
-            #~ print wanted, partition
-            if wanted == partition:
-                if DEBUG&2: log("Opening Logical Partition #%d @%016x %s", partition, ebr.partitions[0].offset(), partutils.raw2chs(ebr.partitions[0].sFirstSectorCHS))
-                part = disk.partition(d, ebr.partitions[0].offset(), ebr.partitions[0].size())
-                part.seek(0)
-                bs = part.read(512)
-                part.seek(0)
-                break
-            if ebr.partitions[1].dwFirstSectorLBA and ebr.partitions[1].dwTotalSectors:
-                if DEBUG&2: log("Scanning next Logical Partition @%016x %s size %.02f MiB", ebr.partitions[1].offset(), partutils.raw2chs(ebr.partitions[1].sFirstSectorCHS), ebr.partitions[1].size()/(1<<20))
-                extpart = disk.partition(d, ebr.partitions[1].offset(), ebr.partitions[1].size())
-            else:
-                break
-            wanted+=1
-    else:
+    if mbr.partitions[0].bType == 0xEE and mbr.partitions[0].sLastSectorCHS == '\xFF\xFF\xFF': # GPT
+        d.seek(512)
+        blk = d.read(512)
+        gpt = partutils.GPT(blk)
+        if DEBUG&2: log("Opened GPT Header: %s", gpt)
+        d.seek(gpt.u64PartitionEntryLBA*512)
+        blk = d.read(gpt.dwNumberOfPartitionEntries * gpt.dwNumberOfPartitionEntries)
+        gpt.parse(blk)
+        blocks = gpt.partitions[partition].u64EndingLBA - gpt.partitions[partition].u64StartingLBA + 1
+        if DEBUG&2: log("Opening Partition #%d: %s", partition, gpt.partitions[partition])
+        part = disk.partition(d, gpt.partitions[partition].u64StartingLBA*512, blocks*512)
+        part.seek(0)
         bs = part.read(512)
         part.seek(0)
+    else:
+        index=0
+        if partition > 0:
+            index = 1 # opens Extended Partition
+        part = disk.partition(d, mbr.partitions[index].offset(), mbr.partitions[index].size())
+        if DEBUG&2: log("Opened %s partition @%016x (LBA %016x) %s", ('Primary', 'Extended')[index], mbr.partitions[index].chsoffset(), mbr.partitions[index].lbaoffset(), partutils.raw2chs(mbr.partitions[index].sFirstSectorCHS))
+        if partition > 0:
+            wanted = 1
+            extpart = part
+            while wanted <=partition:
+                bs = extpart.read(512)
+                ebr = partutils.MBR(bs, disksize=d.size) # reads Extended Boot Record
+                if DEBUG&2: log("Opened EBR: %s", ebr)
+                if ebr.wBootSignature != 0xAA55:
+                    print "Invalid Extended Boot Record. Aborted."
+                    sys.exit(1)
+                if DEBUG&2: log("Got partition @%016x (@%016x rel.) %s", ebr.partitions[0].chsoffset(), ebr.partitions[0].lbaoffset(), partutils.raw2chs(ebr.partitions[0].sFirstSectorCHS))
+                if DEBUG&2: log("Next logical partition @%016x (@%016x rel.) %s", ebr.partitions[1].chsoffset(), ebr.partitions[1].lbaoffset(), partutils.raw2chs(ebr.partitions[1].sFirstSectorCHS))
+                #~ print wanted, partition
+                if wanted == partition:
+                    if DEBUG&2: log("Opening Logical Partition #%d @%016x %s", partition, ebr.partitions[0].offset(), partutils.raw2chs(ebr.partitions[0].sFirstSectorCHS))
+                    part = disk.partition(d, ebr.partitions[0].offset(), ebr.partitions[0].size())
+                    part.seek(0)
+                    bs = part.read(512)
+                    part.seek(0)
+                    break
+                if ebr.partitions[1].dwFirstSectorLBA and ebr.partitions[1].dwTotalSectors:
+                    if DEBUG&2: log("Scanning next Logical Partition @%016x %s size %.02f MiB", ebr.partitions[1].offset(), partutils.raw2chs(ebr.partitions[1].sFirstSectorCHS), ebr.partitions[1].size()/(1<<20))
+                    extpart = disk.partition(d, ebr.partitions[1].offset(), ebr.partitions[1].size())
+                else:
+                    break
+                wanted+=1
+        else:
+            bs = part.read(512)
+            part.seek(0)
 
     fstyp = utils.FSguess(FAT.boot_fat16(bs)) # warning: if we call this a second time on the same Win32 disk, handle is unique and seek set already!
     if DEBUG&2: log("FSguess guessed FS type: %s", fstyp)
