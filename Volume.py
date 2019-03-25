@@ -1,8 +1,8 @@
+# -*- coding: cp1252 -*-
 import os, time, sys
 import disk, utils, FAT, exFAT, partutils
 
 DEBUG = 0
-
 from debug import log
 
 def rdiv(a, b):
@@ -12,15 +12,15 @@ def rdiv(a, b):
     else:
         return a/b
 
-def opendisk1 (path, mode='rb', partition=0):
-    "Open a partition returning a file system handle"
+
+
+def openpart(path, mode='rb', partition=0):
+    "Open a partition returning a partition handle"
     if os.name =='nt' and len(path)==2 and path[1] == ':':
         path = '\\\\.\\'+path
     d = disk.disk(path, mode)
     d.seek(0)
-    bs = d.read(512)
-    d.seek(0)
-    mbr = partutils.MBR(bs, disksize=d.size)
+    mbr = partutils.MBR(d.read(512), disksize=d.size)
 
     if DEBUG&2: log("Opened MBR: %s", mbr)
 
@@ -28,10 +28,11 @@ def opendisk1 (path, mode='rb', partition=0):
         print "Invalid Master Boot Record. Aborted."
         sys.exit(1)
 
-    if mbr.partitions[0].bType == 0xEE and mbr.partitions[0].sLastSectorCHS == '\xFF\xFF\xFF': # GPT
+    part = None
+
+    if mbr.partitions[0].bType == 0xEE: # GPT
         d.seek(512)
-        blk = d.read(512)
-        gpt = partutils.GPT(blk)
+        gpt = partutils.GPT(d.read(512), 512)
         if DEBUG&2: log("Opened GPT Header: %s", gpt)
         d.seek(gpt.u64PartitionEntryLBA*512)
         blk = d.read(gpt.dwNumberOfPartitionEntries * gpt.dwNumberOfPartitionEntries)
@@ -40,8 +41,8 @@ def opendisk1 (path, mode='rb', partition=0):
         if DEBUG&2: log("Opening Partition #%d: %s", partition, gpt.partitions[partition])
         part = disk.partition(d, gpt.partitions[partition].u64StartingLBA*512, blocks*512)
         part.seek(0)
-        bs = part.read(512)
-        part.seek(0)
+        part.mbr = mbr
+        part.gpt = gpt
     else:
         index=0
         if partition > 0:
@@ -65,8 +66,6 @@ def opendisk1 (path, mode='rb', partition=0):
                     if DEBUG&2: log("Opening Logical Partition #%d @%016x %s", partition, ebr.partitions[0].offset(), partutils.raw2chs(ebr.partitions[0].sFirstSectorCHS))
                     part = disk.partition(d, ebr.partitions[0].offset(), ebr.partitions[0].size())
                     part.seek(0)
-                    bs = part.read(512)
-                    part.seek(0)
                     break
                 if ebr.partitions[1].dwFirstSectorLBA and ebr.partitions[1].dwTotalSectors:
                     if DEBUG&2: log("Scanning next Logical Partition @%016x %s size %.02f MiB", ebr.partitions[1].offset(), partutils.raw2chs(ebr.partitions[1].sFirstSectorCHS), ebr.partitions[1].size()/(1<<20))
@@ -74,10 +73,18 @@ def opendisk1 (path, mode='rb', partition=0):
                 else:
                     break
                 wanted+=1
-        else:
-            bs = part.read(512)
-            part.seek(0)
+        part.mbr = mbr
+    def open(x): return openvolume(x)
+    disk.partition.open = open # adds an open member to partition object
+    return part
 
+
+
+def openvolume(part):
+    "Opens a filesystem given a Python partition object, returning the root directory Dirtable"
+    part.seek(0)
+    bs = part.read(512)
+    
     fstyp = utils.FSguess(FAT.boot_fat16(bs)) # warning: if we call this a second time on the same Win32 disk, handle is unique and seek set already!
     if DEBUG&2: log("FSguess guessed FS type: %s", fstyp)
 
@@ -106,7 +113,7 @@ def opendisk1 (path, mode='rb', partition=0):
         mod = FAT
         
     root = mod.Dirtable(boot, fat, boot.dwRootCluster)
-    root.MBR = mbr
+    root.MBR = part.mbr
 
     if fstyp == 'EXFAT':
         for e in root.iterator():
@@ -117,50 +124,21 @@ def opendisk1 (path, mode='rb', partition=0):
     return root
 
 
-def opendisk (path, mode='rb'):
-    "Opens a FAT/exFAT filesystem returning the root directory Dirtable"
+
+def openimage(path, mode='rb', obj_type='fs'):
+    "Opens a volume and returns it as root directory (if obj_type is 'fs') or as raw partition"
     if os.name =='nt' and len(path)==2 and path[1] == ':':
         path = '\\\\.\\'+path
     d = disk.disk(path, mode)
     d.seek(0)
-    bs = d.read(512)
-    d.seek(0)
-    fstyp = utils.FSguess(FAT.boot_fat16(bs)) # warning: if we call this a second time on the same Win32 disk, handle is unique and seek set already!
-    if DEBUG&2: log("FSguess guessed FS type: %s", fstyp)
-
-    if fstyp in ('FAT12', 'FAT16'):
-        boot = FAT.boot_fat16(bs, stream=d)
-    elif fstyp == 'FAT32':
-        boot = FAT.boot_fat32(bs, stream=d)
-    elif fstyp == 'EXFAT':
-        boot = exFAT.boot_exfat(bs, stream=d)
-    elif fstyp == 'NTFS':
-        print "NTFS file system not supported. Aborted."
-        sys.exit(1)
+    part = disk.partition(d, 0, d.size)
+    part.seek(0)
+    part.mbr = None
+    if obj_type == 'fs':
+        return openvolume(part)
     else:
-        print "File system not recognized. Aborted."
-        sys.exit(1)
+        return part
 
-    fat = FAT.FAT(d, boot.fatoffs, boot.clusters(), bitsize={'FAT12':12,'FAT16':16,'FAT32':32,'EXFAT':32}[fstyp], exfat=(fstyp=='EXFAT'))
-
-    if DEBUG&2:
-        log("Inited BOOT object: %s", boot)
-        log("Inited FAT object: %s", fat)
-
-    if fstyp == 'EXFAT':
-        mod = exFAT
-    else:
-        mod = FAT
-        
-    root = mod.Dirtable(boot, fat, boot.dwRootCluster)
-    
-    if fstyp == 'EXFAT':
-        for e in root.iterator():
-            if e.type == 1: # Find & open Bitmap
-                boot.bitmap = exFAT.Bitmap(boot, fat, e.dwStartCluster, e.u64DataLength)
-                break
-
-    return root
 
 
 def copy_tree_in(base, dest, callback=None, attributes=None, chunk_size=1<<20):

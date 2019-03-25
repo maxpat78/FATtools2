@@ -102,7 +102,7 @@ class MBR_Partition(object):
     0x1BE: ('bStatus', 'B'), # 80h=bootable, 00h=not bootable, other=invalid
     0x1BF: ('sFirstSectorCHS', '3s'), # absolute (=disk relative) CHS address of 1st partition sector
     0x1C2: ('bType', 'B'), # partition type: 7=NTFS, exFAT; C=FAT32 LBA; E=FAT16 LBA; F=Extended LBA; EE=GPT
-    0x1C3: ('sLastSectorCHS', '3s'), # CHS address of last sector (or FE FF FF if >8GB, or FF FF FF if GPT)
+    0x1C3: ('sLastSectorCHS', '3s'), # CHS address of last sector (or, if >8GB, FE FF FF [FF FF FF if GPT])
     0x1C6: ('dwFirstSectorLBA', '<I'), # LBA address of 1st sector
     # dwFirstSectorLBA in MBR/EBR 1st entry (logical partition) is relative to such partition start (typically 63 sectors);
     # in EBR *2nd* entry it's relative to *extended* partition start
@@ -199,7 +199,7 @@ class MBR(object):
         return s
 
     def delpart(self, index):
-        "Delete a partition, explicitly zeroing all fields"
+        "Deletes a partition, explicitly zeroing all fields"
         self.partitions[index].bStatus = 0
         self.partitions[index].sFirstSectorCHS = '\0\0\0'
         self.partitions[index].bType = 0
@@ -208,7 +208,7 @@ class MBR(object):
         self.partitions[index].dwTotalSectors = 0
     
     def setpart(self, index, start, size, hpc=16):
-        "Create a partition, given the start offset and size in bytes"
+        "Creates a partition, given the start offset and size in bytes"
         part = MBR_Partition(index=index)
         dwFirstSectorLBA, dwTotalSectors, sFirstSectorCHS, sLastSectorCHS = mkpart(start, size, self.heads_per_cyl)
         if DEBUG&1: log("setpart(%d,%d,%d,%d): dwFirstSectorLBA=%08Xh, dwTotalSectors=%08Xh, sFirstSectorCHS=%s, sLastSectorCHS=%s",index, start, size, hpc, dwFirstSectorLBA, dwTotalSectors, sFirstSectorCHS, sLastSectorCHS)

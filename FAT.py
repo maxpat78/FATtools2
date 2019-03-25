@@ -1361,9 +1361,9 @@ class Dirtable(object):
             self.stream = Chain(boot, fat, startcluster, (boot.cluster*tot, size)[size>0], end=last)
         if path == '.':
             self.dirtable = {} # This *MUST* be propagated from root to descendants! 
-            boot.dirtable = self.dirtable
+            self.boot.dirtable = self.dirtable
         else:
-            self.dirtable = boot.dirtable
+            self.dirtable = self.boot.dirtable
         if startcluster not in self.dirtable:
             self.dirtable[startcluster] = {'LFNs':{}, 'Names':{}, 'Handle':None, 'slots_map':{}} # LFNs key MUST be Unicode!
         #~ if DEBUG&4: log("Global directory table is '%s':", self.dirtable)
@@ -1554,6 +1554,15 @@ class Dirtable(object):
     def close(self, handle):
         "Updates a modified entry in the table"
         handle.close()
+
+    def flush(self):
+        "Close all open handles and commits changes to disk, then flushes its cache"
+        if self.path != '.': return
+        if DEBUG&1: log("Flushing FAT root dirtable")
+        for i in self.dirtable:
+            h = self.dirtable[i]['Handle']
+            if h: h.close()
+        self.fat.stream.disk.cache_flush() # force committing to disk before reopening
 
     def map_compact(self):
         "Compacts, eventually reordering, a slots map"

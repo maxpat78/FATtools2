@@ -185,6 +185,8 @@ def fat12_mkfs(stream, size, sector=512, params={}):
     stream.seek(boot.root())
     stream.write(bytearray(boot.wMaxRootEntries*32))
 
+    stream.flush() # force committing to disk before reopening, or could be not useable!
+
     sizes = {0:'B', 10:'KiB',20:'MiB',30:'GiB',40:'TiB',50:'EiB'}
     k = 0
     for k in sorted(sizes):
@@ -339,6 +341,8 @@ def fat16_mkfs(stream, size, sector=512, params={}):
     # Blank root at fixed offset
     stream.seek(boot.root())
     stream.write(bytearray(boot.wMaxRootEntries*32))
+
+    stream.flush() # force committing to disk before reopening, or could be not useable!
 
     sizes = {0:'B', 10:'KiB',20:'MiB',30:'GiB',40:'TiB',50:'EiB'}
     k = 0
@@ -517,6 +521,7 @@ def fat32_mkfs(stream, size, sector=512, params={}):
     stream.write(bytearray(boot.cluster))
 
     #~ fat = FAT(stream, boot.fatoffs, boot.clusters(), bitsize=32)
+    stream.flush() # force committing to disk before reopening, or could be not useable!
 
     sizes = {0:'B', 10:'KiB',20:'MiB',30:'GiB',40:'TiB',50:'EiB'}
     k = 0

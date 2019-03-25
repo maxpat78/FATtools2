@@ -294,6 +294,8 @@ def exfat_mkfs(stream, size, sector=512, params={}):
     root.stream.write(label.pack())
     root.stream.write(bitmap.pack())
     root.stream.write(upcase.pack())
+    
+    root.flush() # commit all changes to disk immediately, or volume won't be usable!
 
     sizes = {0:'B', 10:'KiB',20:'MiB',30:'GiB',40:'TiB',50:'EiB'}
     k = 0

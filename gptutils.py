@@ -1,5 +1,7 @@
 # -*- coding: cp1252 -*-
-import utils, struct, uuid, zlib
+"Utilities to handle GPT partitions"
+
+import utils, struct, uuid, zlib, ctypes
 
 DEBUG = 0
 from debug import log
@@ -38,43 +40,77 @@ class GPT(object):
     def __init__ (self, s=None, offset=0, stream=None):
         self._i = 0
         self._pos = offset # base offset
-        self._buf = s or bytearray(512) # normal MBR size
+        self._buf = s or bytearray(512) # normal GPT Header  size
         self.stream = stream
         self._kv = self.layout.copy()
         self._vk = {} # { name: offset}
         self.partitions = []
+        self.raw_partitions = None
         for k, v in self._kv.items():
             self._vk[v[0]] = k
     
     __getattr__ = utils.common_getattr
 
     def pack(self):
-        "Update internal buffer"
-        self._crc32()
+        "Updates internal buffer"
+        for i in self.partitions:
+            for k, v in i._kv.items():
+                self.raw_partitions[i._pos+k:i._pos+k+struct.calcsize(v[1])] = struct.pack(v[1], getattr(i, v[0]))
+        self._crc32a()
         for k, v in self._kv.items():
             self._buf[k:k+struct.calcsize(v[1])] = struct.pack(v[1], getattr(self, v[0]))
-        #~ for i in self.partitions:
-            #~ for k, v in i._kv.items():
-                #~ self._buf[k:k+struct.calcsize(v[1])] = struct.pack(v[1], getattr(i, v[0]))
+        self._crc32()
         return self._buf
 
     def __str__ (self):
         return utils.class2str(self, "GPT Header @%X\n" % self._pos)
 
     def _crc32(self):
-        s = self._buf.tolist()
+        #~ s = self._buf.tolist()
+        s = self._buf
         s[0x10:0x14] = [0,0,0,0]
         crc = zlib.crc32(''.join(map(chr, s[:self.dwHeaderSize])))
+        crc &= 0xFFFFFFFF
         self.dwHeaderCRC32 = crc
         if DEBUG&1: log("_crc32 returned %08X on GPT Header", crc)
+        s[0x10:0x14] = [crc&0xFF, (crc&0x0000FF00)>>8, (crc&0x00FF0000)>>16, (crc&0xFF000000)>>24]
         return crc
+
+    def _crc32a(self):
+        crc = zlib.crc32(self.raw_partitions)
+        crc &= 0xFFFFFFFF
+        self.dwPartitionEntryArrayCRC32 = crc
+        if DEBUG&1: log("_crc32a returned %08X on GPT Array", self.dwPartitionEntryArrayCRC32)
+        return self.dwPartitionEntryArrayCRC32
     
-    def parse(self, s):
-        "Parse the GUID Partition Entry Array"
+    def parse(self, s=None):
+        "Parses the GUID Partition Entry Array"
+        if not s:
+            s = self.raw_partitions
+        else:
+            self.raw_partitions = s
         for i in range(self.dwNumberOfPartitionEntries):
             j = i*self.dwSizeOfPartitionEntry
             k = j + self.dwSizeOfPartitionEntry
-            self.partitions += [GPT_Partition(s[j:k], index=i)]
+            self.partitions += [GPT_Partition(s[j:k], index=i, offset=self.dwSizeOfPartitionEntry*i)]
+
+    def delpart(self, index):
+        "Deletes a partition"
+        self.partitions[index].sPartitionTypeGUID = 16*'\0'
+        self.partitions[index].sUniquePartitionGUID = 16*'\0'
+        self.partitions[index].u64StartingLBA = 0
+        self.partitions[index].u64EndingLBA = 0
+        self.partitions[index].u64Attributes = 0
+        self.partitions[index].sPartitionName = 72*'\0'
+
+    def setpart(self, index, start, size, name='New Basic Data Partition'):
+        "Creates a partition, given the start offset and size in bytes"
+        self.partitions[index].sPartitionTypeGUID = uuid.UUID('EBD0A0A2-B9E5-4433-87C0-68B6B72699C7').get_bytes_le()
+        self.partitions[index].sUniquePartitionGUID = uuid.uuid4().get_bytes_le()
+        self.partitions[index].u64StartingLBA = start
+        self.partitions[index].u64EndingLBA = start+size
+        self.partitions[index].sPartitionName = name.encode('utf-16le')
+
 
 
 class GPT_Partition(object):

@@ -7,6 +7,16 @@ from debug import log
 DEBUG = 0
 
 
+class myfile(file):
+	"Wrapper for file object whose read member returns a string buffer"
+	def __init__ (self, *args):
+		return file.__init__ (self, *args)
+
+	def read(self, size=-1):
+		return create_string_buffer(file.read(self, size))
+
+
+
 class win32_disk(object):
 	"Handles a Win32 disk"
 	open_handles = {}
@@ -151,7 +161,9 @@ class disk(object):
 			self._file = win32_disk(name, mode, buffering)
 			self.size = self._file.size
 		else:
-			self._file = open(name, mode, buffering)
+			#~ self._file = open(name, mode, buffering)
+			# bypasses std file.read to let it return a buffer
+			self._file = myfile(name, mode, buffering)
 			self.size = os.stat(name).st_size
 		atexit.register(self.cache_flush)
 
@@ -179,6 +191,9 @@ class disk(object):
 
 	def cache_stats(self):
 		if DEBUG&1: log("Cache items/hits/misses: %d/%d/%d", len(self.cache_table), self.cache_hits, self.cache_misses)
+		
+	def flush(self):
+		self.cache_flush()
 
 	def cache_flush(self, sector=None):
 		self.cache_stats()
@@ -355,6 +370,47 @@ class disk(object):
 			self.pos += len(s)
 		self.seek(self.pos)
 		self.lastsi = self.si
+
+
+class partition(object):
+	"Emulates a partition using disk object"
+	def __str__ (self):
+		return "Python partition '%s' (offset=%016Xh, size=%d, mode '%s') @%016Xh" % (self.disk._file.name, self.offset, self.size, self.disk.mode, self.pos)
+
+	def __init__(self, disk, offset, size):
+		assert size != 0
+		self.disk = disk
+		self.mode = disk.mode
+		self.offset = offset # partition offset
+		self.size = size #partition size
+		self.pos = 0
+		self.seek(0) # force disk to partition start
+
+	def seek(self, offset, whence=0):
+		if DEBUG&1: log("partion.seek(%016Xh, %d)", offset, whence)
+		if whence == 1:
+			self.pos += offset
+		elif whence == 2:
+			if self.size and offset < self.size:
+				self.pos = self.size - offset
+			elif self.size and offset >= self.size:
+				self.pos = 0
+		else:
+			self.pos = offset
+		self.disk.seek(self.pos+self.offset)
+
+	def tell(self):
+		return self.pos
+
+	def read(self, size=-1):
+		return self.disk.read(size)
+		
+	def write(self, s): # s MUST be of type bytearray/memoryview
+		self.disk.write(s)
+
+	def flush(self):
+		self.disk.flush()
+
 
 
 if __name__ == '__main__':

@@ -101,7 +101,7 @@ class boot_exfat(object):
         hash = 0
         for i in xrange(len(s)):
             if not UpCase and i in (106, 107, 112): continue
-            hash = (((hash<<31) | (hash >> 1)) & 0xFFFFFFFF) + s[i]
+            hash = (((hash<<31) | (hash >> 1)) & 0xFFFFFFFF) + s[i] # 10.3.19: when called from test_inject (VBR read into) it is a *string* buffer instead of bytearray: investigate!
             hash &= 0xFFFFFFFF
         return hash
 
@@ -751,9 +751,7 @@ class exFATDirentry(Direntry):
 
 
 class Dirtable(object):
-    "Manage an exFAT directory table"
-    dirtable = {} # {cluster: {'Names':{}, 'Handle':Handle, 'slots_map':{}}}
-
+    "Manages an exFAT directory table"
     def __init__(self, boot, fat, startcluster=0, size=0, nofat=0, path='.'):
         if type(boot) == HandleType:
             self.handle = boot # It's a directory handle
@@ -768,10 +766,16 @@ class Dirtable(object):
             self.stream = Chain(boot, fat, startcluster, size, nofat)
         self.path = path
         self.needs_compact = 1
-        if self.start not in Dirtable.dirtable:
+        if path == '.':
+            self.dirtable = {} # This *MUST* be propagated from root to descendants!
+            self.boot.dirtable = self.dirtable
+        else:
+            self.dirtable = self.boot.dirtable
+        if self.start not in self.dirtable:
             # Names maps lowercased names and Direntry slots
             # Handle contains the unique Handle to the directory table
-            Dirtable.dirtable[self.start] = {'Names':{}, 'Handle':None, 'slots_map':{}} # Names key MUST be Python Unicode!
+            self.dirtable[self.start] = {'Names':{}, 'Handle':None, 'slots_map':{}} # Names key MUST be Python Unicode!
+            #~ if DEBUG&4: log("Global directory table is '%s':", self.dirtable)
             self.map_slots()
 
     def __str__ (self):
@@ -827,9 +831,9 @@ class Dirtable(object):
             break
         if found:
             if DEBUG&8: log("opened directory table '%s' @0x%X (cluster 0x%X)", found.path, self.boot.cl2offset(found.start), found.start)
-            if Dirtable.dirtable[found.start]['Handle']:
+            if self.dirtable[found.start]['Handle']:
                 # Opened many, closed once!
-                found.handle = Dirtable.dirtable[found.start]['Handle']
+                found.handle = self.dirtable[found.start]['Handle']
                 if DEBUG&8: log("retrieved previous directory Handle %s", found.handle)
                 # We must update the Chain stream associated with the unique Handle,
                 # or size variations will be discarded!
@@ -844,7 +848,7 @@ class Dirtable(object):
                 res.Entry = e
                 res.Dir = parent
                 found.handle = res
-                Dirtable.dirtable[found.start]['Handle'] = res
+                self.dirtable[found.start]['Handle'] = res
         return found
 
     def _alloc(self, name, clusters=0):
@@ -905,7 +909,7 @@ class Dirtable(object):
         handle.write(bytearray(self.boot.cluster)) # blank table
         self._update_dirtable(handle.Entry)
         # Records the unique Handle to the directory
-        Dirtable.dirtable[handle.File.start] = {'Names':{}, 'Handle':handle, 'slots_map':{0:(256<<20)/32}}
+        self.dirtable[handle.File.start] = {'Names':{}, 'Handle':handle, 'slots_map':{0:(256<<20)/32}}
         return Dirtable(handle, None, path=os.path.join(self.path, name))
 
     def rmtree(self, name=None):
@@ -934,14 +938,23 @@ class Dirtable(object):
     def close(self, handle):
         "Update a modified entry in the table"
         handle.close()
+    
+    def flush(self):
+        "Close all open handles and commits changes to disk, then flushes its cache"
+        if self.path != '.': return
+        if DEBUG&1: log("Flushing exFAT root dirtable")
+        for i in self.dirtable:
+            h = self.dirtable[i]['Handle']
+            if h: h.close()
+        self.fat.stream.disk.cache_flush() # force committing to disk before reopening
 
     def map_compact(self):
         "Compacts, eventually reordering, a slots map"
         if not self.needs_compact: return
-        #~ print "Map before:", sorted(Dirtable.dirtable[self.start]['slots_map'].iteritems())
+        #~ print "Map before:", sorted(self.dirtable[self.start]['slots_map'].iteritems())
         map_changed = 0
         while 1:
-            M = Dirtable.dirtable[self.start]['slots_map']
+            M = self.dirtable[self.start]['slots_map']
             d=copy.copy(M)
             for k,v in sorted(M.iteritems()):
                 while d.get(k+32*v): # while contig runs exist, merge
@@ -952,17 +965,17 @@ class Dirtable(object):
                     #~ print "Compacted {%d:%d} -> {%d:%d}" %(k,v,k,v+v1)
                     #~ print sorted(d.iteritems())
                     v+=v1
-            if Dirtable.dirtable[self.start]['slots_map'] != d:
-                Dirtable.dirtable[self.start]['slots_map'] = d
+            if self.dirtable[self.start]['slots_map'] != d:
+                self.dirtable[self.start]['slots_map'] = d
                 map_changed = 1
                 continue
             break
         self.needs_compact = 0
-        #~ print "Map after:", sorted(Dirtable.dirtable[self.start]['slots_map'].iteritems())
+        #~ print "Map after:", sorted(self.dirtable[self.start]['slots_map'].iteritems())
 
     def map_slots(self):
         "Fills the free slots map and file names table once at first access"
-        if not Dirtable.dirtable[self.start]['slots_map']:
+        if not self.dirtable[self.start]['slots_map']:
             self.stream.seek(0)
             pos = 0
             s = ''
@@ -983,7 +996,7 @@ class Dirtable(object):
                         continue
                     # if not, and we record an erased slot...
                     if first_free > -1:
-                        Dirtable.dirtable[self.start]['slots_map'][first_free] = run_length
+                        self.dirtable[self.start]['slots_map'][first_free] = run_length
                         first_free = -1
                     if s[0] & 0x7F in (0x5, 0x20): # composite slot
                         count = s[1] # slots to collect
@@ -1002,27 +1015,27 @@ class Dirtable(object):
                     buf = bytearray()
                 if not s or not s[0]:
                     # Maps unallocated space to max table size (256 MiB)
-                    Dirtable.dirtable[self.start]['slots_map'][pos] = ((256<<20) - pos)/32
+                    self.dirtable[self.start]['slots_map'][pos] = ((256<<20) - pos)/32
                     break
             self.needs_compact = 1
             self.stream.seek(0)
             if DEBUG&8:
-                log("%s collected slots map: %s", self, Dirtable.dirtable[self.start]['slots_map'])
-                log("%s dirtable: %s", self, Dirtable.dirtable[self.start])
+                log("%s collected slots map: %s", self, self.dirtable[self.start]['slots_map'])
+                log("%s dirtable: %s", self, self.dirtable[self.start])
         
     def findfree(self, length=32):
         "Returns the offset of the first free slot or requested slot group size (in bytes)"
         length /= 32 # convert length in slots
-        if DEBUG&8: log("%s: findfree(%d) in map: %s", self, length, Dirtable.dirtable[self.start]['slots_map'])
+        if DEBUG&8: log("%s: findfree(%d) in map: %s", self, length, self.dirtable[self.start]['slots_map'])
         if self.needs_compact:
             self.map_compact()
-        for start in sorted(Dirtable.dirtable[self.start]['slots_map']):
-            rl = Dirtable.dirtable[self.start]['slots_map'][start]
+        for start in sorted(self.dirtable[self.start]['slots_map']):
+            rl = self.dirtable[self.start]['slots_map'][start]
             if length > 1 and length > rl: continue
-            del Dirtable.dirtable[self.start]['slots_map'][start]
+            del self.dirtable[self.start]['slots_map'][start]
             if length < rl:
-                Dirtable.dirtable[self.start]['slots_map'][start+32*length] = rl-length # updates map
-            if DEBUG&8: log("%s: found free slot @%d, updated map: %s", self, start, Dirtable.dirtable[self.start]['slots_map'])
+                self.dirtable[self.start]['slots_map'][start+32*length] = rl-length # updates map
+            if DEBUG&8: log("%s: found free slot @%d, updated map: %s", self, start, self.dirtable[self.start]['slots_map'])
             return start
         # exFAT table limit is 256 MiB, about 2.8 mil. slots of minimum size (96 bytes)
         if DEBUG&8: log("%s: maximum table size reached!",self)
@@ -1058,20 +1071,20 @@ class Dirtable(object):
     def _update_dirtable(self, it, erase=False):
         k = it.Name().lower()
         if erase:
-            del Dirtable.dirtable[self.start]['Names'][k]
+            del self.dirtable[self.start]['Names'][k]
             return
         if DEBUG&8: log("updating Dirtable name cache with '%s'", k)
-        Dirtable.dirtable[self.start]['Names'][k] = it
+        self.dirtable[self.start]['Names'][k] = it
 
     def find(self, name):
         "Finds an entry by name. Returns it or None if not found"
         # Creates names cache
-        if not Dirtable.dirtable[self.start]['Names']:
+        if not self.dirtable[self.start]['Names']:
             self.map_slots()
         if DEBUG&8:
             log("find: searching for %s (%s lower-cased)", name, name.lower())
         name = name.decode(FS_ENCODING).lower()
-        return Dirtable.dirtable[self.start]['Names'].get(name)
+        return self.dirtable[self.start]['Names'].get(name)
 
     def dump(self, n, range=3):
         "Returns the n-th slot in the table for debugging purposes"
@@ -1108,7 +1121,7 @@ class Dirtable(object):
             e._buf[i] ^= (1<<7)
         self.stream.seek(e._pos)
         self.stream.write(e._buf)
-        Dirtable.dirtable[self.start]['slots_map'][e._pos] = len(e._buf)/32 # updates slots map
+        self.dirtable[self.start]['slots_map'][e._pos] = len(e._buf)/32 # updates slots map
         self.needs_compact = 1
         if DEBUG&8: log("Erased slot '%s' @%Xh (pointing at #%d)", name, e._pos, start)
         self._update_dirtable(e, True)
@@ -1207,7 +1220,7 @@ class Dirtable(object):
                 if DEBUG&8: log("Can't shrink directory table, free space < 1 cluster!")
         # Rebuilds Dirtable caches
         self.slots_map = {}
-        Dirtable.dirtable[self.start] = {'Names':{}, 'Handle':None, 'slots_map':{}}
+        self.dirtable[self.start] = {'Names':{}, 'Handle':None, 'slots_map':{}}
         self.map_slots()
         return last/32, unused/32
 
