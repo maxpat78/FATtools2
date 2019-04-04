@@ -5,7 +5,8 @@ This is a refinement and extension of my FATtools provided in PyDiskTools on Git
 
 Born to re-sort in an arbitrary order the directory entries in a FAT32 root table to cope with some hardware MP3 players' limits, it now provides full read/write support in Python 2.7 (32-bit) for FAT12/16/32 and exFAT filesystems, for hacking and recovering purposes.
 
-It is able to open disk partitioned with both MBR or GPT and to help in partitioning. 
+It is able to open disk partitioned with both MBR or GPT and to help in partitioning.
+It can transparently create, read and write Dynamic and Differencing VHD disk images.
 
 Actually, following features are implemented (mostly in Python, with a few ctypes calls to handle Win32 disks natively; *but it works in Linux, also*):
 - sector aligned read/writes with both file images and real disks
