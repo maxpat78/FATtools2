@@ -1,6 +1,6 @@
 # -*- coding: cp1252 -*-
 import os, time, sys
-import disk, utils, FAT, exFAT, partutils
+import disk, utils, FAT, exFAT, partutils, vhdutils
 
 DEBUG = 0
 from debug import log
@@ -18,7 +18,10 @@ def openpart(path, mode='rb', partition=0):
     "Open a partition returning a partition handle"
     if os.name =='nt' and len(path)==2 and path[1] == ':':
         path = '\\\\.\\'+path
-    d = disk.disk(path, mode)
+    if path.lower().endswith('.vhd'): # VHD image
+        d = vhdutils.Image(path, mode)
+    else:
+        d = disk.disk(path, mode)
     d.seek(0)
     mbr = partutils.MBR(d.read(512), disksize=d.size)
 

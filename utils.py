@@ -40,7 +40,7 @@ def FSguess(boot):
     "Try to guess the file system type between FAT12/16/32, exFAT and NTFS examining the boot sector"
     # if no signature or JMP opcode, it is not valid
     #~ print boot._buf[0], ord(boot._buf[0]), hex(ord(boot._buf[0]))
-    if boot.wBootSignature != 0xAA55 or boot._buf[0] != chr(0xEB):
+    if boot.wBootSignature != 0xAA55 or boot._buf[0] not in ('\xEB', 0xEB):
         return 'NONE'
     if boot.chOemID.startswith('NTFS'):
         return 'NTFS'
