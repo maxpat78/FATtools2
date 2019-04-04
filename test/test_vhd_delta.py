@@ -1,12 +1,13 @@
 # -*- coding: cp1252 -*-
 
-import sys, glob, ctypes, uuid
+import sys, glob, ctypes, uuid, stress
 
-#~ import logging
-#~ logging.basicConfig(level=logging.DEBUG, filename='test_inject.log', filemode='w')
+import logging
+logging.basicConfig(level=logging.DEBUG, filename='test_delta_vhd.log', filemode='w')
 
-import Volume, mkfat
+import Volume, mkfat, vhdutils
 #~ Volume.DEBUG = 255
+#~ Volume.vhdutils.DEBUG = 255
 #~ Volume.partutils.DEBUG = 255
 #~ Volume.FAT.DEBUG = 255
 #~ Volume.exFAT.DEBUG = 255
@@ -17,14 +18,17 @@ from Volume import *
 def printn(s):
  print s
 
-DISK = 'HD'
-fssize = 256<<20 # MB
+DISK='mybase.vhd'
+fssize = 1<<30 # MB
 
-print "Creating a blank %.02f MiB disk image" % (fssize/float(1<<20))
-f = open(DISK, 'wb')
-f.seek(fssize)
-f.truncate()
-f.seek(0)
+print "Creating a blank %.02f MiB Dynamic VHD disk image" % (fssize/float(1<<20))
+vhdutils.mk_dynamic(DISK, fssize, upto=40<<30)
+
+print "Creating a blank %.02f MiB Differencing VHD disk image, linked to previous one" % (fssize/float(1<<20))
+vhdutils.mk_diff('delta.vhd', DISK)
+DISK='delta.vhd'
+
+f = vhdutils.Image(DISK, 'r+b')
 
 print "Making a GPT data partition on it"
 print "Writing protective MBR"
@@ -65,10 +69,26 @@ f.close()
 
 print "Applying FAT File System on partition"
 f = openpart(DISK, 'r+b')
-#~ mkfat.fat16_mkfs(f, (gpt.partitions[0].u64EndingLBA-gpt.partitions[0].u64StartingLBA+1)*512)
-mkfat.exfat_mkfs(f, (gpt.partitions[0].u64EndingLBA-gpt.partitions[0].u64StartingLBA+1)*512)
+mkfat.fat16_mkfs(f, (gpt.partitions[0].u64EndingLBA-gpt.partitions[0].u64StartingLBA+1)*512)
+#~ mkfat.exfat_mkfs(f, (gpt.partitions[0].u64EndingLBA-gpt.partitions[0].u64StartingLBA+1)*512)
 
-print "Injecting a Python27 tree"
 root = openpart(DISK, 'r+b').open()
-subdir = root.mkdir('Python')
-copy_tree_in('C:\Python27', subdir, printn, 2)
+root.create('a.txt').write('CIAO')
+
+#~ print "Injecting a Python27 tree"
+#~ root = openpart(DISK, 'r+b').open()
+#~ subdir = root.mkdir('Python')
+#~ copy_tree_in('C:\Python27', subdir, printn, 2)
+
+#~ print "Running stress test..."
+#~ class Opts():
+ #~ pass
+ 
+#~ opts = Opts()
+#~ opts.threshold=99
+#~ opts.file_size=1<<20
+#~ opts.programs=63
+#~ opts.debug=0
+#~ opts.sha1=1
+#~ opts.fix=0
+#~ stress.stress(opts, [DISK])
