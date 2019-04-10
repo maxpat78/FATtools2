@@ -20,7 +20,7 @@ The default block requires a 1-sector bitmap since it is 4096 sectors long.
 
 A DIFFERENCING VHD is a dynamic image containing only new or modified blocks
 of a parent VHD image (fixed, dynamic or differencing itself). The block
-bitmap must be used to determine which sectors of the child image are in use.
+bitmap must be checked to determine which sectors are in use.
 
 Since offsets are represented in sectors, the BAT can address sectors in a range
 from zero to 2^32-1 or about 2 TiB.
@@ -28,7 +28,7 @@ The disk image itself is shorter due to VHD internal structures (assuming 2^20
 blocks of default size, 4 MiB are occupied by the BAT and 512 MiB by bitmap
 sectors.
 
-PLEASE NOTE THAT ALL NUMBERS (BITMAP, TOO) ARE IN BIG ENDIAN FORMAT! """
+PLEASE NOTE THAT ALL NUMBERS ARE IN BIG ENDIAN FORMAT! """
 import utils, struct, uuid, zlib, ctypes, time, os, math
 
 DEBUG = 0
@@ -50,10 +50,10 @@ class Footer(object):
     "VHD Footer"
     layout = { # { offset: (name, unpack string) }
     0x00: ('sCookie', '8s'), # conectix
-    0x08: ('dwFeatures', '>I'), # 0=None, 1=Temporary, 2=Reserved
+    0x08: ('dwFeatures', '>I'), # 0=None, 1=Temporary, 2=Reserved (default)
     0x0C: ('dwFileFormatVersion', '>I'), #0x10000
     0x10: ('u64DataOffset', '>Q'), # absolute offset of next structure, or 0xFFFFFFFFFFFFFFFF for fixed disks
-    0x18: ('dwTimestamp', '>I'), # creation time, in seconds since 1/1/2000 12:00 AM
+    0x18: ('dwTimestamp', '>I'), # creation time, in seconds since 1/1/2000 12:00 AM UTC
     0x1C: ('dwCreatorApp', '4s'), # creator application, here Py
     0x20: ('dwCreatorVer', '>I'), # its version, here 0x20007 (2.7)
     0x24: ('dwCreatorHost', '4s'), # Wi2k or Mac
@@ -117,10 +117,10 @@ class DynamicHeader(object):
     0x20: ('dwBlockSize', '>I'), # block size (default 2 MiB)
     0x24: ('dwChecksum', '>I'),
     0x28: ('sParentUniqueId', '16s'), # UUID of parent disk in a differencing disk
-    0x38: ('dwParentTimeStamp', '>I'),
+    0x38: ('dwParentTimeStamp', '>I'), # Timestamp in parent's footer
     0x3C: ('dwReserved', '>I'),
-    0x40: ('sParentUnicodeName', '512s'),  # Windows 10 stores the absolute pathname (Big-Endian)
-    0x240: ('sParentLocatorEntries', '192s'),
+    0x40: ('sParentUnicodeName', '512s'),  # Windows 10 stores the parent's absolute pathname (Big-Endian)
+    0x240: ('sParentLocatorEntries', '192s'), # Parent Locators array (see later)
     # REST (256 BYTES) IS RESERVED AND MUST BE ZERO
     } # Size = 0x400 (1024 byte)
 
@@ -155,7 +155,7 @@ class DynamicHeader(object):
         return utils.class2str(self, "VHD Dynamic Header @%X\n" % self._pos)
 
     def crc(self):
-        crc = self._buf[64:68]
+        crc = self._buf[0x24:0x28]
         self._buf[0x24:0x28] = '\0\0\0\0'
         c_crc = mk_crc(self._buf)
         self._buf[0x24:0x28] = crc
@@ -216,8 +216,9 @@ class BAT(object):
 
 
 class ParentLocator(object):
+    "Element in the Dynamic Header Parent Locators array"
     layout = { # { offset: (name, unpack string) }
-    0x00: ('dwPlatformCode', '4s'), # W2ru, W2ku
+    0x00: ('dwPlatformCode', '4s'), # W2ru, W2ku in Windows
     0x04: ('dwPlatformDataSpace', '>I'), # sectors needed to store the locator
     0x08: ('dwPlatformDataLength', '>I'), # locator length in bytes
     0x0C: ('dwReserved', '>I'),
@@ -249,6 +250,7 @@ class ParentLocator(object):
 class BlockBitmap(object):
     "Handles the block bitmap"
     def __init__ (self, s, i):
+        if DEBUG&8: log("inited Bitmap for block #%d", i)
         self.bmp = s
         self.i = i
 
@@ -267,7 +269,7 @@ class BlockBitmap(object):
             if DEBUG&8: log("got byte {0:08b}".format(B))
             todo = min(8-rem, length)
             if clear:
-                B &= ~((0xFF>>(8-todo)) << rem)
+                B &= ~(((0xFF<<(8-todo))&0xFF) >> rem)
             else:
                 B |= (((0xFF<<(8-todo))&0xFF) >> rem)
             self.bmp[pos] = B
@@ -289,7 +291,7 @@ class BlockBitmap(object):
             B = self.bmp[pos]
             if DEBUG&8: log("got B={0:08b}".format(B))
             if clear:
-                B &= ~(0xFF>>(8-rem))
+                B &= ~((0xFF<<(8-rem))&0xFF)
             else:
                 B |= ((0xFF<<(8-rem))&0xFF)
             self.bmp[pos] = B
@@ -311,6 +313,8 @@ class Image(object):
         self.Parent = None
         if not self.footer.isvalid():
             raise BaseException("VHD Image Footer is not valid!")
+        if self.footer.dwDiskType not in (2, 3, 4):
+            raise BaseException("Unknown VHD Image type!")
         if self.footer.dwDiskType in (3, 4):
             self.stream.seek(0)
             self.footer_copy = Footer(self.stream.read(512))
@@ -337,20 +341,23 @@ class Image(object):
                         if DEBUG&8: log("Ok, parent image found.")
                         break
             if not parent:
-                raise BaseException("VHD Differencing Image parent not found!")
-            #~ hparent = self.header.sParentUnicodeName.decode('utf-16be')
-            #~ hparent = hparent[:hparent.find('\0')]
+                hparent = self.header.sParentUnicodeName.decode('utf-16be')
+                hparent = hparent[:hparent.find('\0')]
+                raise BaseException("VHD Differencing Image parent '%s' not found!" % hparent)
             self.Parent = Image(parent, "rb")
             if self.Parent.footer.dwTimestamp != self.header.dwParentTimeStamp:
-                if DEBUG&8: log("DEBUG TimeStamps: parent=%d self=%d",  self.Parent.footer.dwTimestamp, self.header.dwParentTimeStamp)
+                if DEBUG&8: log("TimeStamps: parent=%d self=%d",  self.Parent.footer.dwTimestamp, self.header.dwParentTimeStamp)
                 #~ raise BaseException("Differencing Image timestamp not matched!")
             if self.Parent.footer.sUniqueId != self.header.sParentUniqueId:
                 raise BaseException("Differencing Image parent's UUID not matched!")
-            self.read = self.read1 # ASSIGNS SPECIAL READ FUNCTION
-            self.write = self.write1 # ASSIGNS SPECIAL WRITE FUNCTION
+            self.read = self.read1 # assigns special read and write functions
+            self.write = self.write1
+        if self.footer.dwDiskType == 2: # Fixed VHD
+            self.read = self.read0 # assigns special read and write functions
+            self.write = self.write0
         self.size = self.footer.u64CurrentSize
         self.seek(0)
-    
+
     def cache_flush(self):
         self.stream.flush()
 
@@ -358,6 +365,7 @@ class Image(object):
         self.stream.flush()
 
     def seek(self, offset, whence=0):
+        # "virtual" seeking, real is performed at read/write time!
         if DEBUG&8: log("%s: seek(0x%X, %d) from 0x%X", self.name, offset, whence, self._pos)
         if not whence:
             self._pos = offset
@@ -377,10 +385,18 @@ class Image(object):
     def close(self):
         self.stream.close()
         
+    def read0(self, size=-1):
+        "Reads (Fixed image)"
+        if size == -1 or self._pos + size > self.size:
+            size = self.size - self._pos # reads all
+        self.stream.seek(self._pos)
+        self._pos += size
+        return self.stream.read(size)
+
     def read(self, size=-1):
         "Reads (Dynamic, non-Differencing image)"
-        if size == -1:
-            size = self.size - self._pos # read all
+        if size == -1 or self._pos + size > self.size:
+            size = self.size - self._pos # reads all
         buf = bytearray()
         while size:
             block = self.bat[self._pos/self.block]
@@ -404,8 +420,8 @@ class Image(object):
 
     def read1(self, size=-1):
         "Reads (Differencing image)"
-        if size == -1:
-            size = self.size - self._pos # read all
+        if size == -1 or self._pos + size > self.size:
+            size = self.size - self._pos # reads all
         buf = bytearray()
         bmp = None
         while size:
@@ -424,8 +440,9 @@ class Image(object):
             self._pos += got
             # Acquires Block bitmap once
             if not bmp or bmp.i != block:
-                self.stream.seek(block*512)
-                bmp = BlockBitmap(self.stream.read(self.bitmap_size), block)
+                if block != 0xFFFFFFFF:
+                    self.stream.seek(block*512)
+                    bmp = BlockBitmap(self.stream.read(self.bitmap_size), block)
             if block == 0xFFFFFFFF or not bmp.isset(sector):
                 if DEBUG&4: log("reading %d bytes from parent", got)
                 self.Parent.seek(self._pos-got)
@@ -435,6 +452,15 @@ class Image(object):
                 self.stream.seek(block*512+self.bitmap_size+sector*512+offset)
                 buf += self.stream.read(got)
         return buf
+
+    def write0(self, s):
+        "Writes (Fixed image)"
+        if DEBUG&8: log("%s: write 0x%X bytes from 0x%X", self.name, len(s), self._pos)
+        size = len(s)
+        if not size: return
+        self.stream.seek(self._pos)
+        self._pos += size
+        self.stream.write(s)
 
     def write(self, s):
         "Writes (Dynamic, non-Differencing image)"
@@ -566,12 +592,13 @@ def mk_crc(s):
 
 
 def mk_fixed(name, size):
-    "Creates an empty fixed VHD"
+    "Creates an empty fixed VHD or transforms a previous image"
     ft = Footer()
     ft.sCookie = 'conectix'
+    ft.dwFeatures = 2
     ft.dwFileFormatVersion = 0x10000
     ft.u64DataOffset = 0xFFFFFFFFFFFFFFFF
-    ft.dwTimestamp = time.time()-946681200
+    ft.dwTimestamp = time.mktime(time.gmtime())-946681200
     ft.dwCreatorApp = 'Py  '
     ft.dwCreatorVer = 0x20007
     ft.dwCreatorHost = 'Wi2k'
@@ -581,22 +608,31 @@ def mk_fixed(name, size):
     ft.dwDiskType = 2
     ft.sUniqueId = uuid.uuid4().bytes
     
-    if DEBUG&4: log("making new Fixed VHD '%s' of %.02f MiB", name, float(size/(1<<20)))
-
-    f = myfile(name, 'wb')
-    f.seek(size) # quickly allocates space
+    if os.path.exists(name):
+        if DEBUG&4: log("making new Fixed VHD '%s' of %.02f MiB from pre-existant image", name, float(size/(1<<20)))
+        f = myfile(name, 'r+b')
+        f.seek(size)
+        f.truncate()
+    else:
+        if DEBUG&4: log("making new Fixed VHD '%s' of %.02f MiB", name, float(size/(1<<20)))
+        f = myfile(name, 'wb')
+        f.seek(size) # quickly allocates space
     f.write(ft.pack()) # stores Footer
     f.flush(); f.close()
 
 
 
-def mk_dynamic(name, size, block=(2<<20), upto=0):
+def mk_dynamic(name, size, block=(2<<20), upto=0, overwrite='no'):
     "Creates an empty dynamic VHD"
+    if os.path.exists(name) and overwrite!='yes':
+        raise BaseException("Can't silently overwrite a pre-existing VHD image!")
+
     ft = Footer()
     ft.sCookie = 'conectix'
+    ft.dwFeatures = 2
     ft.dwFileFormatVersion = 0x10000
     ft.u64DataOffset = 512
-    ft.dwTimestamp = time.time()-946681200
+    ft.dwTimestamp = time.mktime(time.gmtime())-946681200
     ft.dwCreatorApp = 'Py  '
     ft.dwCreatorVer = 0x20007
     ft.dwCreatorHost = 'Wi2k'
@@ -632,9 +668,12 @@ def mk_dynamic(name, size, block=(2<<20), upto=0):
 
 
 
-def mk_diff(name, base):
+def mk_diff(name, base, overwrite='no'):
     "Creates an empty differencing VHD"
+    if os.path.exists(name) and overwrite!='yes':
+        raise BaseException("Can't silently overwrite a pre-existing VHD image!")
     ima = Image(base)
+    ima.footer.dwTimestamp = time.mktime(time.gmtime())-946681200
     ima.footer.dwDiskType = 4
     ima.footer.dwCreatorApp = 'Py  '
     ima.footer.dwCreatorVer = 0x20007
@@ -653,31 +692,35 @@ def mk_diff(name, base):
     ima.header.dwParentTimeStamp = ima.footer.dwTimestamp
     ima.header.sParentUnicodeName = be_base
     
+    loc = ima.header.locators
+
     for i in range(8):
-        ima.header.locators[i].dwPlatformCode = '\0\0\0\0'
-        ima.header.locators[i].dwPlatformDataSpace = 0
-        ima.header.locators[i].dwPlatformDataLength = 0
-        ima.header.locators[i].dwPlatformDataOffset = 0
+        loc[i].dwPlatformCode = '\0\0\0\0'
+        loc[i].dwPlatformDataSpace = 0
+        loc[i].dwPlatformDataLength = 0
+        loc[i].dwPlatformDataOffset = 0
+
+    bmpsize=((ima.header.dwMaxTableEntries*4+512)/512)*512
 
     # Windows 10 stores the relative pathname with '.\' for current dir
     # It stores both absolute and relative pathnames, tough it isn't
-    # strictly necessary (but disk manager silently fixes this) 
-    ima.header.locators[0].dwPlatformCode = 'W2ru'
-    ima.header.locators[0].dwPlatformDataSpace = 512
-    ima.header.locators[0].dwPlatformDataLength = len(rel_base)
-    ima.header.locators[0].dwPlatformDataOffset = 1536+ima.header.dwMaxTableEntries*4
+    # strictly necessary (but disk manager silently fixes this)
+    loc[0].dwPlatformCode = 'W2ru'
+    loc[0].dwPlatformDataSpace = ((len(rel_base)+512)/512)*512
+    loc[0].dwPlatformDataLength = len(rel_base)
+    loc[0].dwPlatformDataOffset = 1536+bmpsize
 
-    ima.header.locators[1].dwPlatformCode = 'W2ku'
-    ima.header.locators[1].dwPlatformDataSpace = 512
-    ima.header.locators[1].dwPlatformDataLength = len(abs_base)
-    ima.header.locators[1].dwPlatformDataOffset = 1536+ima.header.dwMaxTableEntries*4+512
+    loc[1].dwPlatformCode = 'W2ku'
+    loc[1].dwPlatformDataSpace = ((len(abs_base)+512)/512)*512
+    loc[1].dwPlatformDataLength = len(abs_base)
+    loc[1].dwPlatformDataOffset = loc[0].dwPlatformDataOffset+loc[0].dwPlatformDataSpace
         
     f.write(ima.header.pack()) # stores dynamic header
 
-    f.write(ima.header.dwMaxTableEntries*4*'\xFF') # initializes BAT
+    f.write(bmpsize*'\xFF') # initializes BAT
 
-    f.write(rel_base+'\0'*(512-len(rel_base))) # stores parent locator sector
-    f.write(abs_base+'\0'*(512-len(abs_base))) # stores parent locator sector
+    f.write(rel_base+'\0'*(loc[0].dwPlatformDataSpace-len(rel_base))) # stores relative parent locator sector
+    f.write(abs_base+'\0'*(loc[1].dwPlatformDataSpace-len(abs_base))) # stores absolute parent locator sector
 
     f.write(ima.footer.pack()) # stores footer
     f.flush(); f.close()
