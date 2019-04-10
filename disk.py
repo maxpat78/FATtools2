@@ -167,6 +167,10 @@ class disk(object):
 			self.size = os.stat(name).st_size
 		atexit.register(self.cache_flush)
 
+	def close(self):
+		self.cache_flush()
+		self._file.close()
+
 	def seek(self, offset, whence=0):
 		if whence == 1:
 			self.pos += offset
@@ -385,6 +389,9 @@ class partition(object):
 		self.size = size #partition size
 		self.pos = 0
 		self.seek(0) # force disk to partition start
+
+	def close(self):
+		self.disk.close()
 
 	def seek(self, offset, whence=0):
 		if DEBUG&1: log("partion.seek(%016Xh, %d)", offset, whence)

@@ -1012,7 +1012,10 @@ class Handle(object):
         return self.File.trunc()
 
     def close(self):
-        if not self.IsValid:
+        # 20170608: RE-DESIGN CAREFULLY THE FULL READ-ONLY MATTER!
+        if not self.IsValid or self.IsReadOnly:
+        #~ if not self.IsValid:
+            if DEBUG&8: log("Handle.close rejected %s (EINV ERDO)", self.File)
             return
 
         # Force setting the start cluster if allocated on write
