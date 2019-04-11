@@ -129,10 +129,13 @@ def openvolume(part):
 
 
 def openimage(path, mode='rb', obj_type='fs'):
-    "Opens a volume and returns it as root directory (if obj_type is 'fs') or as raw partition"
+    "Opens a disk or image and returns it as root directory (if obj_type is 'fs') or as raw blocks"
     if os.name =='nt' and len(path)==2 and path[1] == ':':
         path = '\\\\.\\'+path
-    d = disk.disk(path, mode)
+    if path.lower().endswith('.vhd'): # VHD image
+        d = vhdutils.Image(path, mode)
+    else:
+        d = disk.disk(path, mode)
     d.seek(0)
     part = disk.partition(d, 0, d.size)
     part.seek(0)
