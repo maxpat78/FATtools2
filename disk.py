@@ -62,12 +62,12 @@ class win32_disk(object):
 		self._pos = 0
 		
 	def seek(self, offset, whence=0):
-		if whence == 0:
-			npos = offset
-		elif whence == 1:
+		if whence == 1:
 			npos = self._pos + offset
+		elif whence == 2:
+			npos = self.size + offset
 		else:
-			npos = self._pos - offset
+			npos = offset
 		if self._pos == npos:
 			if DEBUG&1: log("note: call to SetFilePointer superseded, offset is still %Xh", npos)
 			return
@@ -175,12 +175,12 @@ class disk(object):
 		if whence == 1:
 			self.pos += offset
 		elif whence == 2:
-			if self.size and offset < self.size:
-				self.pos = self.size - offset
-			elif self.size and offset >= self.size:
-				self.pos = 0
+			if self.size:
+				self.pos = self.size + offset
 		else:
 			self.pos = offset
+		if self.pos > self.size: self.pos = self.size
+		if self.pos < 0: self.pos = 0
 		self.si = self.pos / self.blocksize
 		self.so = self.pos % self.blocksize
 		#~ if self.si == self.lastsi:
@@ -398,12 +398,12 @@ class partition(object):
 		if whence == 1:
 			self.pos += offset
 		elif whence == 2:
-			if self.size and offset < self.size:
-				self.pos = self.size - offset
-			elif self.size and offset >= self.size:
-				self.pos = 0
+			if self.size:
+				self.pos = self.size + offset
 		else:
 			self.pos = offset
+		if self.pos < 0: self.pos = 0
+		if self.pos > self.size: self.pos = self.size
 		self.disk.seek(self.pos+self.offset)
 
 	def tell(self):

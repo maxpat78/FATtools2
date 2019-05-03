@@ -1,10 +1,10 @@
 # -*- coding: windows-1252 -*-
 from random import *
-import sys, os, hashlib, logging, optparse
+import sys, os, hashlib, logging, optparse, hexdump
 
 DEBUG=0
 
-from Volume import openpart
+from Volume import openpart, openimage
 import Volume
 from debug import log
 
@@ -95,7 +95,10 @@ class RandFile(object):
 
 def stress(opts, args):
     "Randomly populates and erases a tree of random files and directories (for test purposes)"
-    root = openpart(args[0], 'r+b').open()
+    if (args[0][-1] == ':'):
+        root = openimage(args[0], 'r+b')
+    else:
+        root = openpart(args[0], 'r+b').open()
     
     dirs_made, files_created, files_erased = 0,0,0
     
@@ -222,9 +225,10 @@ def stress(opts, args):
 
     if opts.programs & 32:
         if DEBUG&1: log("----- Cleaning & shrinking directory tables...")
-        for o in files_set:
-            o.fp.close() # prevents altering the dirtable after the cleaning
-        if DEBUG&1: log("----- Closed all open handles")
+        root.flush()
+        #~ for o in files_set:
+            #~ o.fp.close() # prevents altering the dirtable after the cleaning
+        #~ if DEBUG&1: log("----- Closed all open handles")
         visited = set()
         for o in files_set:
             if o.path in visited: continue
@@ -254,6 +258,7 @@ def stress(opts, args):
         cb=0
         for o in files_set:
             a = os.path.join(o.path, o.name)
+            if DEBUG&7: log("%s %8d %s", o.sha1, o.size, a) # log file hash, size and pathname for debug purposes
             #~ if len(a)+4 > 260: continue
             o.fp.seek(0)
             s = o.fp.read()
@@ -291,7 +296,9 @@ if __name__ == '__main__':
         logging.basicConfig(level=logging.DEBUG, filename='stress.log', filemode='w')
         Volume.DEBUG = opts.debug
         Volume.FAT.DEBUG = opts.debug
+        Volume.FAT.hexdump = hexdump
         Volume.exFAT.DEBUG = opts.debug
+        Volume.exFAT.hexdump = hexdump
         Volume.disk.DEBUG = opts.debug
 
     if opts.fix:

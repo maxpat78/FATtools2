@@ -11,8 +11,7 @@ from zlib import crc32
 import disk, utils
 from debug import log
 
-if DEBUG&4:
-    import hexdump
+if DEBUG&4: import hexdump
 
 FS_ENCODING = sys.getfilesystemencoding()
 
@@ -237,7 +236,7 @@ class FAT(object):
         self.bits = bitsize # cluster slot bits (12, 16 or 32)
         self.offset = offset # relative FAT offset (1st copy)
         # CAVE! This accounts the 0-1 unused cluster index?
-        self.offset2 = offset + rdiv(rdiv(clusters*bitsize, 8), 512)*512 # relative FAT offset (2nd copy)
+        self.offset2 = offset + (((clusters*bitsize+7)/8)+511)/512*512 # relative FAT offset (2nd copy)
         self.exfat = exfat # true if exFAT (aka FAT64)
         self.reserved = 0x0FF7
         self.bad = 0x0FF7
@@ -420,7 +419,7 @@ class FAT(object):
         else:
             # FAT32 could reach ~1GB!
             PAGE = 1<<20
-        END_OF_CLUSTERS = self.offset + rdiv(self.size*self.bits, 8) + (2*self.bits)/8
+        END_OF_CLUSTERS = self.offset + (self.size*self.bits+7)/8 + (2*self.bits)/8
         i = self.offset+(2*self.bits)/8 # address of cluster #2
         self.stream.seek(i)
         while i < END_OF_CLUSTERS:
@@ -643,15 +642,15 @@ class Chain(object):
         self.start = cluster # start cluster or zero if empty
         self.end = end # end cluster
         self.nofat = nofat # 0=uses FAT (fragmented)
-        self.size = rdiv(size, boot.cluster)*boot.cluster
+        self.size = (size+boot.cluster-1)/boot.cluster*boot.cluster
         # Size in bytes of allocated cluster(s)
         if self.start and (not nofat or not self.fat.exfat):
             if not size or not end:
                 self.size, self.end = fat.count(cluster)
                 self.size *= boot.cluster
         else:
-            self.size = rdiv(size, boot.cluster)*boot.cluster
-            self.end = cluster+ rdiv(size, boot.cluster)
+            self.size = (size+boot.cluster-1)/boot.cluster*boot.cluster
+            self.end = cluster + (size+boot.cluster-1)/boot.cluster
         self.filesize = size or self.size # file size, if available, or chain size
         self.pos = 0 # virtual stream linear pos
         # Virtual Cluster Number (cluster index in this chain)
@@ -696,7 +695,7 @@ class Chain(object):
         "Returns the longest run of clusters, up to 'length' bytes, from current position"
         if not self.runs:
             self._get_frags()
-        n = rdiv(length, self.boot.cluster) # contig clusters searched for
+        n = (length+self.boot.cluster-1)/self.boot.cluster # contig clusters searched for
         found = 0
         items = self.runs.items()
         for start, count in items:
@@ -705,8 +704,7 @@ class Chain(object):
                 found=1
                 break
         if not found:
-            print "FATAL! maxrun4len did NOT found current LCN!", self.runs, self.lastvlcn
-            assert 0
+            raise FATException("FATAL! maxrun4len did NOT found current LCN!\n%s\n%s" % (self.runs, self.lastvlcn))
         left = start+count-self.lastvlcn[1] # clusters to end of run
         run = min(n, left)
         maxchunk = run*self.boot.cluster
@@ -734,13 +732,13 @@ class Chain(object):
             self.pos += offset
         elif whence == 2:
             if self.size:
-                self.pos = self.size - offset
+                self.pos = self.size + offset
         else:
             self.pos = offset
         # allocate some clusters if needed (in write mode)
         if self.pos > self.size:
             if self.boot.stream.mode == 'r+b':
-                clusters = rdiv(self.pos, self.boot.cluster) - self.size/self.boot.cluster
+                clusters = (self.pos+self.boot.cluster-1)/self.boot.cluster - self.size/self.boot.cluster
                 self._alloc(clusters)
                 if DEBUG&4: log("Chain%08X: allocated %d cluster(s) seeking %Xh", self.start, clusters, self.pos)
             else:
@@ -766,7 +764,7 @@ class Chain(object):
         if DEBUG&4: log("Chain%08X: reached chain's end seeking VCN %Xh", self.start, self.vcn)
 
     def read(self, size=-1):
-        if DEBUG&4: log("Chain%08X: read(%d) called from offset %Xh (%d)", self.start, size, self.pos, self.pos)
+        if DEBUG&4: log("Chain%08X: read(%d) called from offset %Xh (%d) of %d", self.start, size, self.pos, self.pos, self.filesize)
         # If negative size, set it to file size
         if size < 0:
             size = self.filesize
@@ -803,7 +801,7 @@ class Chain(object):
             # Alloc more clusters from actual last one
             # reqb=requested bytes, reqc=requested clusters
             reqb = self.pos + len(s) - self.size
-            reqc = rdiv(reqb, self.boot.cluster)
+            reqc = (reqb+self.boot.cluster-1)/self.boot.cluster
             if DEBUG&4:
                 log("pos=%X(%d), len=%d, size=%d(%Xh)", self.pos, self.pos, len(s), self.size, self.size)
                 log("required %d byte(s) [%d cluster(s)] more to write", reqb, reqc)
@@ -840,7 +838,7 @@ class Chain(object):
     def trunc(self):
         "Truncates the clusters chain to the current one, freeing the rest"
         x = self.pos/self.boot.cluster # last VCN (=actual) to set
-        n = rdiv(self.size, self.boot.cluster) - x - 1 # number of clusters to free
+        n = (self.size+self.boot.cluster-1)/self.boot.cluster - x - 1 # number of clusters to free
         if DEBUG&4: log("%s: truncating @VCN %d, freeing %d clusters", self, x, n)
         if not n:
             if DEBUG&4: log("nothing to truncate!")
@@ -913,7 +911,7 @@ class FixedRoot(object):
             pos = self.pos + offset
         elif whence == 2:
             if self.size:
-                pos = self.size - offset
+                pos = self.size + offset
         else:
             pos = offset
         if pos > self.size:
@@ -963,7 +961,7 @@ class Handle(object):
         self.Entry = None # direntry slot
         self.Dir = None #dirtable owning the handle
         self.IsReadOnly = True # use this to prevent updating a Direntry on a read-only filesystem
-        atexit.register(self.close) # forces close() on exit if user didn't call it
+        #~ atexit.register(self.close) # forces close() on exit if user didn't call it
 
     def __del__ (self):
         self.close()
@@ -1362,15 +1360,18 @@ class Dirtable(object):
         else:
             tot, last = fat.count(startcluster)
             self.stream = Chain(boot, fat, startcluster, (boot.cluster*tot, size)[size>0], end=last)
+            self.stream.isdirectory = 1 # signals to blank cluster tips
         if path == '.':
             self.dirtable = {} # This *MUST* be propagated from root to descendants! 
             self.boot.dirtable = self.dirtable
+            atexit.register(self.flush)
         else:
             self.dirtable = self.boot.dirtable
         if startcluster not in self.dirtable:
-            self.dirtable[startcluster] = {'LFNs':{}, 'Names':{}, 'Handle':None, 'slots_map':{}} # LFNs key MUST be Unicode!
+            self.dirtable[startcluster] = {'LFNs':{}, 'Names':{}, 'Handle':None, 'slots_map':{}, 'Open':[]} # LFNs key MUST be Unicode!
         #~ if DEBUG&4: log("Global directory table is '%s':", self.dirtable)
         self.map_slots()
+        self.filetable = self.dirtable[startcluster]['Open']
 
     def __str__ (self):
         s = "Directory table @LCN %X (LBA %Xh)" % (self.start, self.boot.cl2offset(self.start))
@@ -1405,6 +1406,7 @@ class Dirtable(object):
             res.File = Chain(self.boot, self.fat, e.Start(), e.dwFileSize)
             res.Entry = e
             res.Dir = self
+            self.filetable += [res]
         return res
 
     def opendir(self, name):
@@ -1488,6 +1490,7 @@ class Dirtable(object):
         handle.Dir = self
         self._update_dirtable(handle.Entry)
         if DEBUG&4: log("Created new file '%s' @%Xh", name, handle.File.start)
+        self.filetable += [handle]
         return handle
 
     def mkdir(self, name):
@@ -1527,7 +1530,7 @@ class Dirtable(object):
         self._update_dirtable(handle.Entry)
         handle.close()
         # Records the unique Handle to the directory
-        self.dirtable[handle.File.start] = {'LFNs':{}, 'Names':{}, 'Handle':handle, 'slots_map':{64:(2<<20)/32-2}}
+        self.dirtable[handle.File.start] = {'LFNs':{}, 'Names':{}, 'Handle':handle, 'slots_map':{64:(2<<20)/32-2}, 'Open':[]}
         #~ return Dirtable(handle, None, path=os.path.join(self.path, name))
         return self.opendir(name)
 
@@ -1559,13 +1562,30 @@ class Dirtable(object):
         handle.close()
 
     def flush(self):
-        "Close all open handles and commits changes to disk, then flushes its cache"
-        if self.path != '.': return
-        if DEBUG&1: log("Flushing FAT root dirtable")
-        for i in self.dirtable:
+        "Closes all open handles and commits changes to disk"
+        if self.path != '.':
+            if DEBUG&1: log("Flushing dirtable for '%s'", self.path)
+            dirs = {self.start: self.dirtable[self.start]}
+        else:
+            if DEBUG&1: log("Flushing root dirtable")
+            dirs = self.dirtable
+        for i in dirs:
+            for h in self.dirtable[i]['Open']:
+               if DEBUG&1: log("Closing file handle for opened file '%s'", h)
+               h.close()
             h = self.dirtable[i]['Handle']
-            if h: h.close()
-        self.fat.stream.disk.cache_flush() # force committing to disk before reopening
+            if h:
+                h.close()
+                h.IsValid = False
+        if self.path == '.':
+            try:
+                if hasattr(self.fat.stream, 'cache_flush'):
+                    flush = self.fat.stream.cache_flush
+                elif hasattr(self.fat.stream.disk, 'cache_flush'):
+                    flush = self.fat.stream.disk.cache_flush
+                flush() # force committing to disk before reopening
+            except ValueError:
+                if DEBUG&1: log("ValueError: I/O operation on closed file")
 
     def map_compact(self):
         "Compacts, eventually reordering, a slots map"
@@ -1821,8 +1841,8 @@ class Dirtable(object):
         self.stream.write(bytearray(unused)) # blank unused area
         if DEBUG&4: log("%s: sorted %d slots, blanked %d", self.path, last/32, unused/32)
         if shrink:
-            c_alloc = rdiv(self.stream.size, self.boot.cluster)
-            c_used = rdiv(last, self.boot.cluster)
+            c_alloc = (self.stream.size+self.boot.cluster-1)/self.boot.cluster
+            c_used = (last+self.boot.cluster-1)/self.boot.cluster
             if c_used < c_alloc:
                 self.stream.seek(last)
                 self.stream.trunc()
@@ -1833,7 +1853,7 @@ class Dirtable(object):
         # Rebuilds Dirtable caches
         #~ self.slots_map = {}
         # Rebuilds Dirtable caches
-        self.dirtable[self.start] = {'LFNs':{}, 'Names':{}, 'Handle':None, 'slots_map':{}}
+        self.dirtable[self.start] = {'LFNs':{}, 'Names':{}, 'Handle':None, 'slots_map':{}, 'Open':[]}
         self.map_slots()
         return last/32, unused/32
 
@@ -1878,16 +1898,6 @@ class Dirtable(object):
         for subdir in dirs:
             for a,b,c in self.opendir(subdir).walk():
                 yield a, b, c
-
-
-
-def rdiv(a, b):
-    "Divide a by b eventually rounding up"
-    if a % b:
-        return a/b + 1
-    else:
-        return a/b
-
 
 
          #############################

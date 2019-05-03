@@ -82,11 +82,11 @@ def fat12_mkfs(stream, size, sector=512, params={}):
         fsinfo = {}
         cluster_size = (2**i)
         clusters = (size - reserved_size) / cluster_size
-        fat_size = rdiv((12*(clusters+2))/8, sector) * sector # 12-bit slot
+        fat_size = ((12*(clusters+2))/8+sector-1)/sector * sector # 12-bit slot
         required_size = cluster_size*clusters + fat_copies*fat_size + reserved_size
         while required_size > size:
             clusters -= 1
-            fat_size = rdiv((12*(clusters+2))/8, sector) * sector # 12-bit slot
+            fat_size = ((12*(clusters+2))/8+sector-1)/sector * sector # 12-bit slot
             required_size = cluster_size*clusters + fat_copies*fat_size + reserved_size
         if clusters > 4085:
             continue
@@ -232,11 +232,11 @@ def fat16_mkfs(stream, size, sector=512, params={}):
         fsinfo = {}
         cluster_size = (2**i)
         clusters = (size - reserved_size) / cluster_size
-        fat_size = rdiv(2*(clusters+2), sector) * sector
+        fat_size = (2*(clusters+2)+sector-1)/sector * sector
         required_size = cluster_size*clusters + fat_copies*fat_size + reserved_size
         while required_size > size:
             clusters -= 1
-            fat_size = rdiv(2*(clusters+2), sector) * sector
+            fat_size = (2*(clusters+2)+sector-1)/sector * sector
             required_size = cluster_size*clusters + fat_copies*fat_size + reserved_size
         # Should switch to FAT12?
         if clusters < 4086 or clusters > 65525: # MS imposed limits
@@ -394,11 +394,11 @@ def fat32_mkfs(stream, size, sector=512, params={}):
         fsinfo = {}
         cluster_size = (2**i)
         clusters = (size - reserved_size) / cluster_size
-        fat_size = rdiv(4*(clusters+2), sector) * sector
+        fat_size = (4*(clusters+2)+sector-1)/sector * sector
         required_size = cluster_size*clusters + fat_copies*fat_size + reserved_size
         while required_size > size:
             clusters -= 1
-            fat_size = rdiv(4*(clusters+2), sector) * sector
+            fat_size = (4*(clusters+2)+sector-1)/sector * sector
             required_size = cluster_size*clusters + fat_copies*fat_size + reserved_size
         if (clusters < 65526 and not params.get('fat32_allows_few_clusters')) or clusters > 0x0FFFFFF6: # MS imposed limits
             continue

@@ -305,6 +305,7 @@ class Image(object):
         self.size = 0 # size of virtual stream
         self.name = name
         self.stream = myfile(name, mode)
+        self._file = self.stream
         self.mode = mode
         self.stream.seek(0, 2)
         size = self.stream.tell()
@@ -330,16 +331,21 @@ class Image(object):
             self.bitmap_size = max(512, (self.block/512)/8) # bitmap sectors size
         if self.footer.dwDiskType == 4: # Differencing VHD
             parent = ''
+            loc = None
             for i in range(8):
                 loc = self.header.locators[i]
-                if loc.dwPlatformCode in ('W2ru', 'W2ku'):
+                if loc.dwPlatformCode == 'W2ku': break # prefer absolute pathname
+            if not loc:
+                for i in range(8):
+                    loc = self.header.locators[i]
+                    if loc.dwPlatformCode == 'W2ru': break
+            if loc:
                     self.stream.seek(loc.dwPlatformDataOffset)
                     parent = self.stream.read(loc.dwPlatformDataLength)
                     parent = str(parent).decode('utf-16le') # This in Windows format!
                     if DEBUG&8: log("%s: init trying to access parent image '%s'", self.name, parent)
                     if os.path.exists(parent):
                         if DEBUG&8: log("Ok, parent image found.")
-                        break
             if not parent:
                 hparent = self.header.sParentUnicodeName.decode('utf-16be')
                 hparent = hparent[:hparent.find('\0')]
@@ -684,7 +690,8 @@ def mk_diff(name, base, overwrite='no'):
     f = myfile(name, 'wb')
     f.write(ima.footer.pack()) # stores footer copy
 
-    rel_base = os.path.relpath(base).encode('utf-16le')
+    rel_base = os.path.relpath(base, os.path.splitdrive(base)[0]).encode('utf-16le')
+    if rel_base[0] != '.': rel_base = '.\\'+rel_base
     abs_base = os.path.abspath(base).encode('utf-16le')
     be_base = os.path.abspath(base).encode('utf-16be')+'\0\0'
     

@@ -5,13 +5,6 @@ import disk, utils, FAT, exFAT, partutils, vhdutils
 DEBUG = 0
 from debug import log
 
-def rdiv(a, b):
-    "Divide a by b eventually rounding up"
-    if a % b:
-        return a/b + 1
-    else:
-        return a/b
-
 
 
 def openpart(path, mode='rb', partition=0):
@@ -114,7 +107,7 @@ def openvolume(part):
         mod = exFAT
     else:
         mod = FAT
-        
+
     root = mod.Dirtable(boot, fat, boot.dwRootCluster)
     root.MBR = part.mbr
 
@@ -174,7 +167,7 @@ def copy_tree_in(base, dest, callback=None, attributes=None, chunk_size=1<<20):
             fp = open(src, 'rb')
             st = os.stat(src)
             # Create target, preallocating all clusters
-            dst = target_dir.create(file, rdiv(st.st_size, dest.boot.cluster))
+            dst = target_dir.create(file, (st.st_size+dest.boot.cluster-1)/dest.boot.cluster)
             if callback: callback(src)
             while 1:
                 s = fp.read(chunk_size)

@@ -12,13 +12,12 @@ from debug import log
 import utils
 from FAT import FAT, Chain
 
-if DEBUG&8:
-    import hexdump
+if DEBUG&8: import hexdump
 
 FS_ENCODING = sys.getfilesystemencoding()
 
 class exFATException(Exception):
-	pass
+    pass
 
 
 class boot_exfat(object):
@@ -395,7 +394,7 @@ class Handle(object):
         self.Dir = None #dirtable owning the handle
         self.IsReadOnly = True
         self.IsDirectory = False
-        atexit.register(self.close)
+        #~ atexit.register(self.close)
         if DEBUG&8: log("Registering new empty Handle")
 
     def update_time(self, i=0):
@@ -426,6 +425,8 @@ class Handle(object):
     def write(self, s):
         if self.IsReadOnly:
             raise exFATException("Can't write, filesystem was opened in Read-Only mode!")
+        if not self.IsValid:
+            raise exFATException("Can't write, invalid Handle!")
         self.File.write(s)
         self.update_time(1)
         #~ self.IsReadOnly = False
@@ -454,9 +455,11 @@ class Handle(object):
 
     def close(self):
         # 20170608: RE-DESIGN CAREFULLY THE FULL READ-ONLY MATTER!
-        if not self.IsValid or self.IsReadOnly:
-        #~ if not self.IsValid:
-            if DEBUG&8: log("Handle.close rejected %s (EINV ERDO)", self.File)
+        if not self.IsValid:
+            if DEBUG&8: log("Handle.close rejected %s (EINV)", self.File)
+            return
+        if self.IsReadOnly:
+            if DEBUG&8: log("Handle.close rejected %s (ERDO)", self.File)
             return
         # Force setting the start cluster if allocated on write
         self.Entry.Start(self.File.start)
@@ -474,7 +477,7 @@ class Handle(object):
             if self.Entry.IsDeleted() and self.Entry.Start():
                 if DEBUG&8: log("Deleted file: deallocating cluster(s)")
                 if self.File.nofat:
-                    self.File.boot.bitmap.free1(self.Entry.Start(), rdiv(self.File.filesize, self.File.boot.cluster))
+                    self.File.boot.bitmap.free1(self.Entry.Start(), (self.File.filesize+self.File.boot.cluster-1)/self.File.boot.cluster)
                 else:
                     self.File.boot.bitmap.free(self.Entry.Start(), self.File.runs)
                 self.IsValid = False
@@ -487,10 +490,11 @@ class Handle(object):
             self.Entry.u64DataLength = self.File.size
 
         self.Dir.stream.seek(self.Entry._pos)
-        if DEBUG&8: log('Closing Handle @%Xh(%Xh) to "%s", cluster=%Xh tell=%d chain=%d size=%d', \
-        self.Entry._pos, self.Dir.stream.realtell(), os.path.join(self.Dir.path,self.Entry.Name()), self.Entry.Start(), self.File.pos, self.File.size, self.File.filesize)
+        if DEBUG&8: log('Closing Handle @%Xh(%Xh) to %s "%s", cluster=%Xh tell=%d chain=%d size=%d', \
+        self.Entry._pos, self.Dir.stream.realtell(), ('file','directory')[self.Entry.IsDir()], os.path.join(self.Dir.path,self.Entry.Name()), self.Entry.Start(), self.File.pos, self.File.size, self.File.filesize)
         self.Dir.stream.write(self.Entry.pack())
-        self.IsValid = False
+        if not self.Entry.IsDir():
+            self.IsValid = False
         if DEBUG&8 > 1: log("Handle close wrote:\n%s", hexdump.hexdump(str(self.Entry._buf),'return'))
         self.Dir._update_dirtable(self.Entry)
 
@@ -596,7 +600,7 @@ class exFATDirentry(Direntry):
         self._kv = {}
         self.type = self._buf[0] & 0x7F
         if self.type == 0 or self.type not in self.slot_types:
-            if DEBUG&8: logging.warning("Unknown slot type: %Xh", self.type)
+            if DEBUG&8: log("Unknown slot type: %Xh", self.type)
         self._kv = self.slot_types[self.type][0].copy() # select right slot ype
         self._name = self.slot_types[self.type][1]
         self._vk = {} # { name: offset}
@@ -719,7 +723,7 @@ class exFATDirentry(Direntry):
         "Generate the exFAT slots set corresponding to a given file name"
         # File Entry part
         # a Stream Extension and a File Name Extension slot are always present
-        self.chSecondaryCount = 1 + rdiv(len(name), 15)
+        self.chSecondaryCount = 1 + (len(name)+14)/15
         self.wFileAttributes = 0x20
         ctime, cms = self.GetDosDateTimeEx()
         self.dwCTime = self.dwMTime = self.dwATime = ctime
@@ -764,31 +768,36 @@ class Dirtable(object):
             self.fat = fat
             self.start = startcluster
             self.stream = Chain(boot, fat, startcluster, size, nofat)
+        self.stream.isdirectory = 1 # signals to blank cluster tips (root too!)
         self.path = path
         self.needs_compact = 1
         if path == '.':
-            self.dirtable = {} # This *MUST* be propagated from root to descendants!
+            self.dirtable = {} # These *MUST* be propagated from root to descendants!
             self.boot.dirtable = self.dirtable
+            atexit.register(self.flush)
         else:
             self.dirtable = self.boot.dirtable
         if self.start not in self.dirtable:
             # Names maps lowercased names and Direntry slots
             # Handle contains the unique Handle to the directory table
-            self.dirtable[self.start] = {'Names':{}, 'Handle':None, 'slots_map':{}} # Names key MUST be Python Unicode!
+            # Open lists opened files
+            self.dirtable[self.start] = {'Names':{}, 'Handle':None, 'slots_map':{}, 'Open':[]} # Names key MUST be Python Unicode!
             #~ if DEBUG&4: log("Global directory table is '%s':", self.dirtable)
             self.map_slots()
+        #~ print self.dirtable
+        self.filetable = self.dirtable[self.start]['Open']
 
     def __str__ (self):
         s = "Directory table @LCN %X (LBA %Xh)" % (self.start, self.boot.cl2offset(self.start))
         return s
         
     def getdiskspace(self):
-        "Return the disk free space in a tuple (clusters, bytes)"
+        "Returns the disk free space in a tuple (clusters, bytes)"
         free_bytes = self.boot.bitmap.free_clusters * self.boot.cluster
         return (self.boot.bitmap.free_clusters, free_bytes)
 
     def open(self, name):
-        "Open the slot corresponding to an existing file name"
+        "Opens the slot corresponding to an existing file name"
         res = Handle()
         if type(name) != DirentryType:
             if len(name) > 242: return res
@@ -809,12 +818,15 @@ class Dirtable(object):
             res.IsValid = True
             res.File = Chain(self.boot, self.fat, e.Start(), e.u64DataLength, nofat=e.IsContig())
             res.IsReadOnly = (self.boot.stream.mode != 'r+b')
+            res.IsDirectory = False
             res.Entry = e
             res.Dir = self
+            self.filetable += [res]
+            if DEBUG&1: log("open() made a new handle for file starting @%Xh", e.Start())
         return res
 
     def opendir(self, name):
-        """Open an existing relative directory path beginning in this table and
+        """Opens an existing relative directory path beginning in this table and
         return a new Dirtable object or None if not found"""
         name = name.replace('/','\\')
         path = name.split('\\')
@@ -852,7 +864,7 @@ class Dirtable(object):
         return found
 
     def _alloc(self, name, clusters=0):
-        "Alloc a new Direntry slot (both file/directory)"
+        "Allocates a new Direntry slot (both file/directory)"
         res = Handle()
         res.IsValid = True
         res.File = Chain(self.boot, self.fat, 0)
@@ -871,7 +883,7 @@ class Dirtable(object):
         return res
 
     def create(self, name, prealloc=0):
-        "Create a new file chain and the associated slot. Erase pre-existing filename."
+        "Creates a new file chain and the associated slot. Erase pre-existing filename."
         if not exFATDirentry.IsValidDosName(name):
             raise exFATException("Invalid characters in name '%s'" % name)
         e = self.open(name)
@@ -884,10 +896,11 @@ class Dirtable(object):
         handle.Dir = self
         self._update_dirtable(handle.Entry)
         if DEBUG&8: log("Created new file '%s' @%Xh", name, handle.File.start)
+        self.filetable += [handle]
         return handle
 
     def mkdir(self, name):
-        "Create a new directory slot, allocating the new directory table"
+        "Creates a new directory slot, allocating the new directory table"
         r = self.opendir(name)
         if r:
             if DEBUG&8: log("mkdir('%s') failed, entry already exists!", name)
@@ -909,11 +922,11 @@ class Dirtable(object):
         handle.write(bytearray(self.boot.cluster)) # blank table
         self._update_dirtable(handle.Entry)
         # Records the unique Handle to the directory
-        self.dirtable[handle.File.start] = {'Names':{}, 'Handle':handle, 'slots_map':{0:(256<<20)/32}}
+        self.dirtable[handle.File.start] = {'Names':{}, 'Handle':handle, 'slots_map':{0:(256<<20)/32}, 'Open':[]}
         return Dirtable(handle, None, path=os.path.join(self.path, name))
 
     def rmtree(self, name=None):
-        "Remove a full directory tree"
+        "Removes a full directory tree"
         if name:
             if DEBUG&8: log("rmtree:opening %s", name)
             target = self.opendir(name)
@@ -936,17 +949,34 @@ class Dirtable(object):
         return 1
 
     def close(self, handle):
-        "Update a modified entry in the table"
+        "Updates a modified entry in the table"
         handle.close()
-    
+
     def flush(self):
-        "Close all open handles and commits changes to disk, then flushes its cache"
-        if self.path != '.': return
-        if DEBUG&1: log("Flushing exFAT root dirtable")
-        for i in self.dirtable:
+        "Closes all open handles and commits changes to disk"
+        if self.path != '.':
+            if DEBUG&1: log("Flushing dirtable for '%s'", self.path)
+            dirs = {self.start: self.dirtable[self.start]}
+        else:
+            if DEBUG&1: log("Flushing root dirtable")
+            dirs = self.dirtable
+        for i in dirs:
+            for h in self.dirtable[i]['Open']:
+               if DEBUG&1: log("Closing file handle for opened file '%s'", h)
+               h.close()
             h = self.dirtable[i]['Handle']
-            if h: h.close()
-        self.fat.stream.disk.cache_flush() # force committing to disk before reopening
+            if h:
+                h.close()
+                h.IsValid = False
+        if self.path == '.':
+            try:
+                if hasattr(self.fat.stream, 'cache_flush'):
+                    flush = self.fat.stream.cache_flush
+                elif hasattr(self.fat.stream.disk, 'cache_flush'):
+                    flush = self.fat.stream.disk.cache_flush
+                flush() # force committing to disk before reopening
+            except ValueError:
+                if DEBUG&1: log("ValueError: I/O operation on closed file")
 
     def map_compact(self):
         "Compacts, eventually reordering, a slots map"
@@ -1106,11 +1136,18 @@ class Dirtable(object):
                 return 0
         start = e.Start()
         if DEBUG&8: log("Erasing slot @%d (pointing at %Xh)", e._pos, start)
+        if start in self.dirtable:
+            if DEBUG&4: log("Marking open Handle for %Xh as invalid", start)
+            self.dirtable[start]['Handle'].IsValid = False # 20190413: prevents post-mortem updating
+        #~ elif start in self.filetable:
+            #~ if DEBUG&4: log("Removing Handle for %Xh from filetable", start)
+            #~ del self.filetable[start]
         if start:
             if e.IsContig():
                 # Free Bitmap directly
-                if DEBUG&8: log("Erasing contig run of %d clusters from %Xh", rdiv(e.u64DataLength, self.boot.cluster), start)
-                self.boot.bitmap.free1(start, rdiv(e.u64DataLength, self.boot.cluster))
+                
+                if DEBUG&8: log("Erasing contig run of %d clusters from %Xh", (e.u64DataLength+self.boot.cluster-1)/self.boot.cluster, start)
+                self.boot.bitmap.free1(start, (e.u64DataLength+self.boot.cluster-1)/self.boot.cluster)
             else:
                 # Free Bitmap following the FAT
                 if DEBUG&8: log("Fragmented contents, freeing FAT chain from %Xh", start)
@@ -1177,7 +1214,7 @@ class Dirtable(object):
     def clean(self, shrink=False):
         "Compacts used slots and blanks unused ones, optionally shrinking the table"
         if DEBUG&8: log("Cleaning directory table %s with keep sort function", self.path)
-        return self.sort(None, shrink) # keep order
+        return self.sort(None, shrink=shrink) # keep order
 
     def stats(self):
         "Prints informations about slots in this directory table"
@@ -1209,8 +1246,8 @@ class Dirtable(object):
         self.stream.write(bytearray(unused)) # blank unused area
         if DEBUG&8: log("%s: sorted %d slots, blanked %d", last/32, unused/32)
         if shrink:
-            c_alloc = rdiv(self.stream.size, self.boot.cluster)
-            c_used = rdiv(last, self.boot.cluster)
+            c_alloc = (self.stream.size+self.boot.cluster-1)/self.boot.cluster
+            c_used = (last+self.boot.cluster-1)/self.boot.cluster
             if c_used < c_alloc:
                 self.stream.seek(last)
                 self.stream.trunc()
@@ -1220,16 +1257,16 @@ class Dirtable(object):
                 if DEBUG&8: log("Can't shrink directory table, free space < 1 cluster!")
         # Rebuilds Dirtable caches
         self.slots_map = {}
-        self.dirtable[self.start] = {'Names':{}, 'Handle':None, 'slots_map':{}}
+        self.dirtable[self.start] = {'Names':{}, 'Handle':None, 'slots_map':{}, 'Open':[]}
         self.map_slots()
         return last/32, unused/32
 
     def listdir(self):
-        "Return a list of file and directory names in this directory, sorted by on disk position"
+        "Returns a list of file and directory names in this directory, sorted by on disk position"
         return map(lambda o:o.Name(), filter(lambda o: o.type==5, [o for o in self.iterator()]))
 
     def walk(self):
-        """Walk across this directory and its childs. For each visited directory,
+        """Walks across this directory and its childs. For each visited directory,
         returns a tuple (root, dirs, files) sorted in disk order. """
         dirs = []
         files = []
@@ -1267,22 +1304,12 @@ class Dirtable(object):
 
 
 
-def rdiv(a, b):
-    "Divide a by b eventually rounding up"
-    if a % b:
-        return a/b + 1
-    else:
-        return a/b
-
-
-
          #############################
         # HIGH LEVEL HELPER ROUTINES #
         ############################
 
-
 def fat_copy_clusters(boot, fat, start):
-    """Duplicate a cluster chain copying the cluster contents to another position.
+    """Duplicates a cluster chain copying the cluster contents to another position.
     Returns the first cluster of the new chain."""
     count = fat.count(start)[0]
     src = Chain(boot, fat, start, boot.cluster*count)

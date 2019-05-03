@@ -114,14 +114,14 @@ def exfat_mkfs(stream, size, sector=512, params={}):
         cluster_size = (2**i)
         clusters = (size - reserved_size) / cluster_size
         # cluster_size increase? FORMAT seems to reserve more space than minimum
-        fat_size = rdiv(4*(clusters+2), sector) * sector
+        fat_size = (4*(clusters+2)+sector-1)/sector * sector
         # round it to cluster_size, or memory page size or something?
-        fat_size = rdiv(fat_size, cluster_size) * cluster_size
+        fat_size = (fat_size+cluster_size-1)/cluster_size * cluster_size
         required_size = cluster_size*clusters + fat_copies*fat_size + reserved_size + dataregion_padding
         while required_size > size:
             clusters -= 1
-            fat_size = rdiv(4*(clusters+2), sector) * sector
-            fat_size = rdiv(fat_size, cluster_size) * cluster_size
+            fat_size = (4*(clusters+2)+sector-1)/sector * sector
+            fat_size = (fat_size+cluster_size-1)/cluster_size * cluster_size
             required_size = cluster_size*clusters + fat_copies*fat_size + reserved_size + dataregion_padding
         if clusters < 1 or clusters > 0xFFFFFFFF:
             continue
@@ -182,8 +182,8 @@ def exfat_mkfs(stream, size, sector=512, params={}):
     boot.u64PartOffset = 0x3F
     boot.u64VolumeLength = sectors
     # We can put FAT far away from reserved area, if we want...
-    boot.dwFATOffset = rdiv(reserved_size, sector)
-    boot.dwFATLength = rdiv(fsinfo['fat_size'], sector)
+    boot.dwFATOffset = (reserved_size+sector-1)/sector
+    boot.dwFATLength = (fsinfo['fat_size']+sector-1)/sector
     # Again, we can put clusters heap far away from usual
     boot.dwDataRegionOffset = boot.dwFATOffset + boot.dwFATLength + dataregion_padding
     boot.dwDataRegionLength = fsinfo['clusters']
@@ -215,15 +215,15 @@ def exfat_mkfs(stream, size, sector=512, params={}):
     b = bytearray(32); b[0] = 0x81
     bitmap = exFATDirentry(b, 0)
     bitmap.dwStartCluster = 2 # default, but not mandatory
-    bitmap.u64DataLength = rdiv(boot.dwDataRegionLength, 8)
+    bitmap.u64DataLength = (boot.dwDataRegionLength+7)/8
 
     # Blank the Bitmap Area
     stream.seek(boot.cl2offset(bitmap.dwStartCluster))
-    for i in range(rdiv(bitmap.u64DataLength, boot.cluster)):
+    for i in range((bitmap.u64DataLength+boot.cluster-1)/boot.cluster):
         stream.write(bytearray(boot.cluster))
 
     # Make the Up-Case table and its file slot (following the Bitmap)
-    start = bitmap.dwStartCluster + rdiv(bitmap.u64DataLength, boot.cluster)
+    start = bitmap.dwStartCluster + (bitmap.u64DataLength+boot.cluster-1)/boot.cluster
 
     # Write the compressed Up-Case table
     stream.seek(boot.cl2offset(start))
@@ -238,7 +238,7 @@ def exfat_mkfs(stream, size, sector=512, params={}):
     upcase.u64DataLength = len(table)
 
     # Finally we can fix the root cluster!
-    boot.dwRootCluster = upcase.dwStartCluster + rdiv(upcase.u64DataLength, boot.cluster)
+    boot.dwRootCluster = upcase.dwStartCluster + (upcase.u64DataLength+boot.cluster-1)/boot.cluster
 
     # Write the VBR area (first 12 sectors) and its backup
     stream.seek(0)
@@ -275,14 +275,14 @@ def exfat_mkfs(stream, size, sector=512, params={}):
     fat = FAT(stream, boot.fatoffs, boot.clusters(), bitsize=32, exfat=True)
 
     # Mark the FAT chain for Bitmap, Up-Case and Root
-    fat.mark_run(bitmap.dwStartCluster, rdiv(bitmap.u64DataLength, boot.cluster))
-    fat.mark_run(upcase.dwStartCluster, rdiv(upcase.u64DataLength, boot.cluster))
+    fat.mark_run(bitmap.dwStartCluster, (bitmap.u64DataLength+boot.cluster-1)/boot.cluster)
+    fat.mark_run(upcase.dwStartCluster, (upcase.u64DataLength+boot.cluster-1)/boot.cluster)
     fat[boot.dwRootCluster] = fat.last
 
     # Initialize the Bitmap and mark the allocated clusters so far
     bmp = Bitmap(boot, fat, bitmap.dwStartCluster)
-    bmp.set(bitmap.dwStartCluster, rdiv(bitmap.u64DataLength, boot.cluster))
-    bmp.set(upcase.dwStartCluster, rdiv(upcase.u64DataLength, boot.cluster))
+    bmp.set(bitmap.dwStartCluster, (bitmap.u64DataLength+boot.cluster-1)/boot.cluster)
+    bmp.set(upcase.dwStartCluster, (upcase.u64DataLength+boot.cluster-1)/boot.cluster)
     bmp.set(boot.dwRootCluster)
 
     boot.bitmap = bmp
@@ -302,7 +302,7 @@ def exfat_mkfs(stream, size, sector=512, params={}):
     for k in sorted(sizes):
         if (fsinfo['required_size'] / (1<<k)) < 1024: break
 
-    free_clusters = boot.dwDataRegionLength - rdiv(bitmap.u64DataLength, boot.cluster) - rdiv(upcase.u64DataLength, boot.cluster) - 1
+    free_clusters = boot.dwDataRegionLength - (bitmap.u64DataLength+boot.cluster-1)/boot.cluster - (upcase.u64DataLength+boot.cluster-1)/boot.cluster - 1
     print "Successfully applied exFAT to a %.02f %s volume.\n%d clusters of %.1f KB.\n%.02f %s free in %d clusters." % (fsinfo['required_size']/float(1<<k), sizes[k], fsinfo['clusters'], fsinfo['cluster_size']/1024.0, free_clusters*boot.cluster/float(1<<k), sizes[k], free_clusters)
     print "\nFAT Region @0x%X, Data Region @0x%X, Root (cluster #%d) @0x%X" % (boot.fatoffs, boot.cl2offset(2), boot.dwRootCluster, boot.cl2offset(boot.dwRootCluster))
 
