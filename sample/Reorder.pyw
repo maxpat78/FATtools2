@@ -116,7 +116,7 @@ class Manipulator(Tk):
                 print "DEBUG: volume to open", root_object
             p.disk = root_object.lower()
             try:
-                p.root = opendisk(p.disk, 'r+b')
+                p.root = openimage(p.disk, 'r+b')
             except:
                 messagebox.showerror('Error', 'Could not open volume "%s"!' % (root_object))
                 return
