@@ -601,7 +601,7 @@ class exFATDirentry(Direntry):
         self.type = self._buf[0] & 0x7F
         if self.type == 0 or self.type not in self.slot_types:
             if DEBUG&8: log("Unknown slot type: %Xh", self.type)
-        self._kv = self.slot_types[self.type][0].copy() # select right slot ype
+        self._kv = self.slot_types[self.type][0].copy() # select right slot type
         self._name = self.slot_types[self.type][1]
         self._vk = {} # { name: offset}
         for k, v in self._kv.items():
@@ -1244,13 +1244,14 @@ class Dirtable(object):
         last = self.stream.tell()
         unused = self.stream.size - last
         self.stream.write(bytearray(unused)) # blank unused area
-        if DEBUG&8: log("%s: sorted %d slots, blanked %d", last/32, unused/32)
+        if DEBUG&8: log("%s: sorted %d slots, blanked %d", self, last/32, unused/32)
         if shrink:
             c_alloc = (self.stream.size+self.boot.cluster-1)/self.boot.cluster
             c_used = (last+self.boot.cluster-1)/self.boot.cluster
             if c_used < c_alloc:
-                self.stream.seek(last)
-                self.stream.trunc()
+                self.handle.ftruncate(last, 1)
+                self.handle.IsValid = 1 # forces updating directory entry sizes
+                self.handle.close()
                 if DEBUG&8: log("Shrank directory table freeing %d clusters", c_alloc-c_used)
                 unused -= (c_alloc-c_used/32)
             else:
