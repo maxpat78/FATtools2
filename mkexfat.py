@@ -311,15 +311,15 @@ def exfat_mkfs(stream, size, sector=512, params={}):
 
 
 if __name__ == '__main__':
+    import Volume
+    import logging
+    logging.basicConfig(level=logging.DEBUG, filename='mkexfat.log', filemode='w')
+
     if len(sys.argv) < 2:
         print "mkexfat error: you must specify a target volume to apply an exFAT file system!"
         sys.exit(1)
 
-    if os.name == 'nt' and len(sys.argv[1])==2 and sys.argv[1][1]==':':
-        disk_name = '\\\\.\\'+sys.argv[1]
-    else:
-        disk_name = sys.argv[1]
-    dsk = disk.disk(disk_name, 'r+b')
+    dsk = Volume.vopen(sys.argv[1], 'r+b', 'disk')
 
     params={}
     if len(sys.argv)==3:

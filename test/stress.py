@@ -4,7 +4,6 @@ import sys, os, hashlib, logging, optparse, hexdump
 
 DEBUG=0
 
-from Volume import openpart, openimage
 import Volume
 from debug import log
 
@@ -95,10 +94,7 @@ class RandFile(object):
 
 def stress(opts, args):
     "Randomly populates and erases a tree of random files and directories (for test purposes)"
-    if (args[0][-1] == ':'):
-        root = openimage(args[0], 'r+b')
-    else:
-        root = openpart(args[0], 'r+b').open()
+    root = Volume.vopen(args[0], 'r+b') # auto-opens first useful filesystem
     
     dirs_made, files_created, files_erased = 0,0,0
     
@@ -110,13 +106,13 @@ def stress(opts, args):
             obj = obj.mkdir(subdir)
             dirs_made+=1
 
-    print "Random tree of %d directories generated" % dirs_made
+    print("Random tree of %d directories generated" % dirs_made)
 
     free_bytes = root.getdiskspace()[1]
     threshold =free_bytes * (1.0-opts.threshold/100.0)
     files_set = []
     
-    print "%d bytes free, threshold=%.02f" % (free_bytes, threshold)
+    print("%d bytes free, threshold=%.02f" % (free_bytes, threshold))
 
     def rand_populate(root, files_set, tree, free_bytes):
         while 1:
@@ -177,27 +173,27 @@ def stress(opts, args):
 
 
     cb = rand_populate(root, files_set, tree, free_bytes)
-    print "Generated %d random files for %d bytes" % (len(files_set), free_bytes-cb)
+    print("Generated %d random files for %d bytes" % (len(files_set), free_bytes-cb))
 
-    print "Creating their handles..."
-    map(lambda x: x.create(), files_set)
+    print("Creating their handles...")
+    list(map(lambda x: x.create(), files_set))
 
-    print "Randomly writing their contents..."
+    print("Randomly writing their contents...")
     while 1:
-        L = map(lambda x: x.write(), files_set)
+        L = [x.write() for x in files_set]
         if 1 not in L: break
 
     if opts.programs & 2:
         if DEBUG&1: log("----- Randomly erasing some files...")
-        print "Randomly erasing some files..."
+        print("Randomly erasing some files...")
         n, cb = rand_erase(files_set)
-        print "Erased %d bytes in %d files" % (cb, n)
+        print("Erased %d bytes in %d files" % (cb, n))
 
     if opts.programs & 4:
         if DEBUG&1: log("----- Randomly truncating some files...")
-        print "Randomly truncating some files..."
+        print("Randomly truncating some files...")
         n = rand_truncate(files_set)
-        print "Truncated %d files" % (n)
+        print("Truncated %d files" % (n))
 
     
     if opts.programs & 12  or opts.programs & 10:
@@ -206,21 +202,21 @@ def stress(opts, args):
         fset = []
         cb = rand_populate(root, fset, tree, free_bytes)
         files_set += fset
-        print "Generated other %d random files for %d bytes" % (len(fset), free_bytes-cb)
+        print("Generated other %d random files for %d bytes" % (len(fset), free_bytes-cb))
         if DEBUG&1: log("Generated other %d random files for %d bytes", len(fset), free_bytes-cb)
 
-        print "Creating their handles..."
-        map(lambda x: x.create(), fset)
+        print("Creating their handles...")
+        list(map(lambda x: x.create(), fset))
 
-        print "Randomly writing their contents..."
+        print("Randomly writing their contents...")
         while 1:
-            L = map(lambda x: x.write(), fset)
+            L = [x.write() for x in fset]
             if 1 not in L: break
     
     if opts.programs & 16:
         if DEBUG&1: log("----- Randomly re-writing some files...")
         n, cb = rand_rewrite(files_set)
-        print "Rewritten %d bytes in %d files" % (cb,n)
+        print("Rewritten %d bytes in %d files" % (cb,n))
         if DEBUG&1: log("Rewritten %d bytes in %d files",cb,n)
 
     if opts.programs & 32:
@@ -236,9 +232,9 @@ def stress(opts, args):
             visited.add(o.path)
             o.dirtable.clean(1)
         if DEBUG&1: log("----- End cleaning directory tables")
-        print "Cleaned and shrinked all directory tables."
+        print("Cleaned and shrinked all directory tables.")
 
-    print "Done."
+    print("Done.")
 
     if opts.sha1:
         # Saves SHA-1 for all files, even erased ones!
@@ -249,11 +245,12 @@ def stress(opts, args):
             # D:\some 256-character path string<NUL>
             if len(a)+4 > 260:
                 cb+=1
-            fp.write(bytearray('%s *%s\n' % (h.sha1.encode('ascii'), a.encode('ascii'))))
-        print "Saved SHA-1 hashes (using %d clusters more) for %d generated files" % (fp.File.size/root.boot.cluster, len(files_set))
+            #~ fp.write(bytearray('%s *%s\n' % (h.sha1.encode('ascii'), a.encode('ascii'))))
+            fp.write(bytearray(b'%s *%s\n' % (h.sha1.encode(), a.encode())))
+        print("Saved SHA-1 hashes (using %d clusters more) for %d generated files" % (fp.File.size/root.boot.cluster, len(files_set)))
         fp.close()
         if cb:
-            print "WARNING: %d files have pathnames >260 chars!" % cb
+            print("WARNING: %d files have pathnames >260 chars!" % cb)
             if DEBUG&1: log("WARNING: %d files have pathnames >260 chars!", cb)
         cb=0
         for o in files_set:
@@ -263,12 +260,14 @@ def stress(opts, args):
             o.fp.seek(0)
             s = o.fp.read()
             if o.sha1 != hashlib.sha1(s).hexdigest():
-                print "SHA1 differ for", a
+                print("SHA1 differ for", a)
                 cb+=1
                 if DEBUG&1: log("PROBLEM: wrong SHA-1 on %s (re-read %d bytes)",a,len(s))
                 #~ open('BAD_'+a.replace('\\','_'),'wb').write(s)
         if cb:
-            print "WARNING: %d files report wrong SHA-1!" % cb
+            print("WARNING: %d files report wrong SHA-1!" % cb)
+    
+    root.flush()
 
             
 
@@ -288,7 +287,7 @@ if __name__ == '__main__':
     opts, args = par.parse_args()
 
     if not args:
-        print "You must specify a drive to test!\n"
+        print("You must specify a drive to test!\n")
         par.print_help()
         sys.exit(1)
 
