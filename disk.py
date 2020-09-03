@@ -1,10 +1,6 @@
 # -*- coding: cp1252 -*-
 import os, sys, atexit
 from ctypes import *
-
-if os.name == 'nt':
-    from ctypes.wintypes import *
-
 from debug import log
 #~ import hexdump
 
@@ -89,7 +85,7 @@ class win32_disk(object):
         if offset == 0xFFFFFFFF:
             if GetLastError() != 0:
                 raise BaseException('SetFilePointer failed with code %d (%s)' % (GetLastError(), FormatError()))
-        return (n.value<<32) & offset
+        return (n.value<<32) | offset
 
     def readinto(self, buf):
         assert len(buf) > 0
@@ -104,16 +100,15 @@ class win32_disk(object):
         self._pos += n.value
 
     def read(self, size=-1):
-        assert size != -1
+        assert size > -1
         n = c_int(0)
-        if len(buf) <= 4096:
-            s = self.buf
-        else:
-            s = create_string_buffer(len(buf))
-        if not windll.kernel32.ReadFile(self.handle, buf, DWORD(size), byref(n), 0):
+        s = create_string_buffer(size)
+        if not windll.kernel32.ReadFile(self.handle, s, DWORD(size), byref(n), 0):
             raise BaseException('ReadFile failed with code %d (%s)' % (GetLastError(), FormatError()))
+        if n.value < size:
+            if DEBUG&1: log("NOTE: ReadFile read %d bytes instead of %d", n.value, size)
         self._pos += n.value
-        return buf
+        return s
 
     def write(self, s):
         if not len(s): return
