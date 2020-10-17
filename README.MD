@@ -1,6 +1,12 @@
 FATtools
 ========
 
+
+PLEASE NOTE:
+THIS CODE IS NOT MAINTAINED ANYMORE!
+SWITCH TO PYTHON3 AND FATTOOLS3!
+
+
 This is a refinement and extension of my FATtools provided in PyDiskTools on GitHub.
 
 Born to re-sort in an arbitrary order the directory entries in a FAT32 root table to cope with some hardware MP3 players' limits, it now provides full read/write support in Python 2.7 (32- and 64-bit) for FAT12/16/32 and exFAT filesystems, for hacking and recovering purposes.
