@@ -4,7 +4,7 @@ FATtools
 
 PLEASE NOTE:
 THIS CODE IS NOT MAINTAINED ANYMORE!
-SWITCH TO PYTHON3 AND FATTOOLS3!
+SWITCH TO PYTHON 3 AND LATEST FATTOOLS FOR PYTHON 3!
 
 
 This is a refinement and extension of my FATtools provided in PyDiskTools on GitHub.
